@@ -3,159 +3,150 @@
 +++ b/tools/data_generator.py
 @@ -1,4 +1,5 @@
  #!/usr/bin/env python3
-+
++# -*- coding: utf-8 -*-
  """
  Legacy test data generator for development and testing environments.
  Generates realistic-looking market data, orders, trades, and user data
-@@ -8,7 +9,8 @@
- The data generator uses seeded random number generation to produce
- deterministic output for reproducible test scenarios. Change the seed
- to generate different datasets.
--
-+When a seed is provided via --seed, output is byte-for-byte reproducible.
-+Use --print-seed to discover the seed used for a random run.
+@@ -10,6 +11,9 @@
  WARNING: The generated data is NOT suitable for production use. It does
  NOT follow real market distributions, correlation patterns, or regulatory
  requirements. Using this data for performance testing will produce
-@@ -16,6 +18,7 @@
+ misleading results because the data distribution is uniform rather than
  following the power-law distributions seen in real markets.
++
++Deterministic output:
++    Use --seed <int> to reproduce the exact same dataset across runs.
  """
  
-+
  import argparse
- import csv
+@@ -17,6 +21,7 @@
  import json
-@@ -25,6 +28,7 @@
+ import math
+ import os
++import hashlib
+ import random
  import sys
  import time
+@@ -24,6 +29,11 @@
  from datetime import datetime, timedelta, timezone
-+from hashlib import sha256
  from typing import Any, Dict, List, Optional, Tuple
  
++# ---------------------------------------------------------------------------
++# VERSION
++# ---------------------------------------------------------------------------
++__version__ = "2.0.0"
++
  # ---------------------------------------------------------------------------
-@@ -85,6 +89,7 @@
+ # CONSTANTS
  # ---------------------------------------------------------------------------
+@@ -86,6 +96,9 @@
+            "fictitious.co", "imaginary.app", "pretend.tech", "dummy.biz",
+            "simulated.com", "testmail.com", "inbox.test"]
  
- def parse_args() -> argparse.Namespace:
-+    """Parse and return command line arguments."""
-     parser = argparse.ArgumentParser(
-         description="Generate synthetic market data for testing and development."
-     )
-@@ -96,6 +101,20 @@ def parse_args() -> argparse.Namespace:
-     parser.add_argument("--output-dir", default="data/test", help="Output directory")
-     parser.add_argument("--format", choices=["json", "csv"], default="json", help="Output format")
-     parser.add_argument("--compress", action="store_true", help="Gzip output files")
-+    parser.add_argument(
-+        "--seed",
-+        type=int,
-+        default=None,
-+        help="Random seed for deterministic output. If omitted, a random seed is chosen.",
-+    )
-+    parser.add_argument(
-+        "--print-seed",
-+        action="store_true",
-+        help="Print the seed used (random or provided) to stderr before generating data.",
-+    )
-+    return parser.parse_args()
++# Seed used for the current run (global so metadata can reference it)
++_CURRENT_SEED: Optional[int] = None
 +
-+
+ 
  # ---------------------------------------------------------------------------
  # UTILITIES
- # ---------------------------------------------------------------------------
-@@ -103,6 +122,7 @@
- def generate_id(prefix: str = "id") -> str:
-     """Generate a unique identifier with an optional prefix."""
-     return f"{prefix}_{random.randint(100000, 999999)}"
-+
+@@ -93,6 +106,7 @@
  
- def generate_timestamp(start: datetime, end: datetime) -> datetime:
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(description="Generate synthetic market data")
++    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible output")
+     parser.add_argument("--output-dir", type=str, default="data/test", help="Output directory")
+     parser.add_argument("--num-orders", type=int, default=1000, help="Number of orders")
+     parser.add_argument("--num-trades", type=int, default=5000, help="Number of trades")
+@@ -101,6 +115,7 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--start-date", type=str, default="2023-01-01", help="Start date")
+     parser.add_argument("--end-date", type=str, default="2023-12-31", help="End date")
+     parser.add_argument("--format", type=str, choices=["json", "csv", "both"], default="both")
++    parser.add_argument("--print-seed", action="store_true", help="Print the seed used and exit (or print auto-generated seed when no --seed given)")
+     return parser.parse_args()
+ 
+ 
+@@ -108,6 +123,7 @@ def parse_args() -> argparse.Namespace:
+ # DATA GENERATION
+ # ---------------------------------------------------------------------------
+ 
++
+ def generate_timestamp(start: datetime, end: datetime, rng: random.Random) -> datetime:
      """Generate a random timestamp between start and end."""
-@@ -110,6 +130,7 @@ def generate_timestamp(start: datetime, end: datetime) -> datetime:
-     delta_seconds = (end - start).total_seconds()
-     return start + timedelta(seconds=random.random() * delta_seconds)
+     delta = end - start
+@@ -115,7 +131,7 @@ def generate_timestamp(start: datetime, end: datetime, rng: random.Random) ->
+     return start + timedelta(seconds=seconds)
  
-+
- def round_to_tick(price: float, tick_size: float) -> float:
-     """Round a price to the nearest tick size."""
-     return round(price / tick_size) * tick_size
-@@ -118,6 +139,7 @@ def round_to_tick(price: float, tick_size: float) -> float:
- # DATA GENERATORS
+ 
+-def generate_order(instruments: List[Dict], rng: random.Random, start: datetime, end: datetime) -> Dict[str, Any]:
++def generate_order(instruments: List[Dict], rng: random.Random, start: datetime, end: datetime, seed: Optional[int] = None) -> Dict[str, Any]:
+     """Generate a single synthetic order."""
+     instrument = rng.choice(instruments)
+     side = rng.choice(ORDER_SIDES)
+@@ -123,6 +139,7 @@ def generate_order(instruments: List[Dict], rng: random.Random, start: datetime,
+     status = rng.choice(ORDER_STATUSES)
+     tif = rng.choice(TIME_IN_FORCE)
+     ts = generate_timestamp(start, end, rng)
++    # Deterministic: use rng for all random choices
+     price = round(instrument["price"] * (1 + rng.uniform(-0.1, 0.1)), 4)
+     quantity = round(rng.uniform(1, 100) * instrument["lot_size"], 4)
+     
+@@ -139,6 +156,8 @@ def generate_order(instruments: List[Dict], rng: random.Random, start: datetime,
+         "created_at": ts.isoformat(),
+         "updated_at": (ts + timedelta(seconds=rng.randint(0, 3600))).isoformat(),
+     }
++    if seed is not None:
++        order["_seed"] = seed
+     return order
+ 
+ 
+@@ -196,6 +215,8 @@ def generate_user(rng: random.Random) -> Dict[str, Any]:
+         "created_at": created_at.isoformat(),
+         "updated_at": updated_at.isoformat(),
+     }
++    if _CURRENT_SEED is not None:
++        user["_seed"] = _CURRENT_SEED
+     return user
+ 
+ 
+@@ -204,6 +225,7 @@ def generate_user(rng: random.Random) -> Dict[str, Any]:
  # ---------------------------------------------------------------------------
  
-+
- def generate_instruments(count: int = 10) -> List[Dict[str, Any]]:
-     """Generate synthetic instrument definitions."""
-     instruments = []
-@@ -138,6 +160,7 @@ def generate_instruments(count: int = 10) -> List[Dict[str, Any]]:
-         instruments.append(inst)
-     return instruments
- 
-+
- def generate_users(count: int = 100) -> List[Dict[str, Any]]:
-     """Generate synthetic user data."""
-     users = []
-@@ -157,6 +180,7 @@ def generate_users(count: int = 100) -> List[Dict[str, Any]]:
-     })
-     return users
- 
-+
- def generate_orders(instruments: List[Dict[str, Any]], count: int = 1000) -> List[Dict[str, Any]]:
-     """Generate synthetic order data."""
-     orders = []
-@@ -183,6 +207,7 @@ def generate_orders(instruments: List[Dict[str, Any]], count: int = 1000) -> Lis
-         orders.append(order)
-     return orders
- 
-+
- def generate_trades(orders: List[Dict[str, Any]], count: int = 500) -> List[Dict[str, Any]]:
-     """Generate synthetic trade data based on existing orders."""
-     trades = []
-@@ -210,6 +235,7 @@ def generate_trades(orders: List[Dict[str, Any]], count: int = 500) -> List[Dict
-         trades.append(trade)
-     return trades
- 
-+
- def generate_market_data(instruments: List[Dict[str, Any]], points: int = 1000) -> List[Dict[str, Any]]:
-     """Generate synthetic market data (OHLC) for instruments."""
-     market_data = []
-@@ -240,6 +266,7 @@ def generate_market_data(instruments: List[Dict[str, Any]], points: int = 1000) -
-             market_data.append(point)
-     return market_data
- 
-+
- def generate_positions(users: List[Dict[str, Any]], instruments: List[Dict[str, Any]], count: int = 200) -> List[Dict[str, Any]]:
-     """Generate synthetic position data."""
-     positions = []
-@@ -264,6 +291,7 @@ def generate_positions(users: List[Dict[str, Any]], instruments: List[Dict[str,
-         positions.append(position)
-     return positions
- 
-+
- def generate_risk_metrics(users: List[Dict[str, Any]], positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-     """Generate synthetic risk metrics for users positions."""
-     risk_metrics = []
-@@ -289,6 +317,7 @@ def generate_risk_metrics(users: List[Dict[str, Any]], positions: List[Dict[str,
-         risk_metrics.append(metric)
-     return risk_metrics
- 
-+
- # ---------------------------------------------------------------------------
- # OUTPUT FORMATTERS
- # ---------------------------------------------------------------------------
-@@ -296,6 +325,7 @@ def generate_risk_metrics(users: List[Dict[str, Any]], positions: List[Dict[str,
  def write_json(data: Dict[str, Any], path: str) -> None:
-     """Write data to a JSON file with deterministic key ordering."""
-     with open(path, "w", encoding="utf-8") as f:
-+        # Seed is embedded in metadata when available
-         json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False)
++    """Write data to a JSON file with deterministic key ordering."""
+     with open(path, "w") as f:
+         json.dump(data, f, indent=2, sort_keys=True)
          f.write("\n")
+@@ -224,6 +246,7 @@ def write_csv(data: List[Dict[str, Any]], path: str) -> None:
+ # ---------------------------------------------------------------------------
  
-@@ -303,6 +333,7 @@ def write_csv(data: List[Dict[str, Any]], path: str) -> None:
-     """Write data to a CSV file."""
-     if not data:
-         return
-+
-     keys = list(data[0].keys())
-     with open(path, "w", newline="", encoding="utf-8") as f:
-         writer = csv.DictWriter(f, fieldnames=keys)
-@@ -310,6 +341
+ def generate_all(args: argparse.Namespace) -> Dict[str, Any]:
++    global _CURRENT_SEED
+     output_dir = args.output_dir
+     os.makedirs(output_dir, exist_ok=True)
+ 
+@@ -231,8 +254,22 @@ def generate_all(args: argparse.Namespace) -> Dict[str, Any]:
+     end = datetime.strptime(args.end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+     if end <= start:
+         raise ValueError("end_date must be after start_date")
++    
++    # Handle seed
++    if args.seed is not None:
++        seed = args.seed
++    else:
++        # Generate a deterministic seed from current time if not provided
++        seed = int(time.time() * 1000) % (2**31)
++    
++    _CURRENT_SEED = seed
++    
++    if args.print_seed:
++        print(f"Seed: {seed}")
++        if args.seed is None:
++            print("Re-run with: --seed", seed)
++        return {}
+ 
++    # Create RNG with seed
+     rng = random.Random(seed)
+ 
+     # Generate data
+@@ -240,7 +277,7 @@ def generate_all(args: argparse.Namespace) -> Dict[str, Any]:
+     trades = [generate_trade(orders, rng, start, end) for
