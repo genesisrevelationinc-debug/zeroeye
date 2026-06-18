@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """
 Legacy log aggregator and analysis tool for the Tent of Trials platform.
 
@@ -10,7 +11,8 @@ WARNING: This tool is LEGACY. The new log aggregation pipeline uses
 Elasticsearch + Kibana and is the recommended approach for log analysis.
 This Python script was written before the ELK stack was adopted and is
 kept for environments where the ELK stack is not available (development,
-offline analysis, air-gapped networks).
+offline analysis, air-gapped networks).  It now also supports JSONL
+output for downstream tooling.
 
 The ELK stack migration was completed in production in Q2 2023. However,
 this script is still used by the security team for forensic analysis
@@ -21,84 +23,87 @@ For logs older than 90 days, this script is the only option.
 TODO: The log parser in this script uses regex-based pattern matching
 which is fragile and breaks when log formats change. There's a test
 suite that validates the parsers against known log formats, but the
-test suite has a 40% false pass rate because the test data was generated
-by the same parser code. The test data needs to be regenerated from
-actual production logs.
 
 Usage:
     python3 log_aggregator.py --input /var/log/app/*.log --output report.json
+    python3 log_aggregator.py --input /var/log/app/*.log --output report.jsonl --format jsonl
     python3 log_aggregator.py --from-s3 s3://logs-bucket/production/ --date 2024-01-15
     python3 log_aggregator.py --analyze --window 1h --group-by service
     python3 log_aggregator.py --stream --filter 'severity:error'
-"""
+    python3 log_aggregator.py --from-s3 s3://logs-bucket/production/ --date 2024-01-15
 
 import argparse
 import collections
+import copy
 import csv
 import gzip
 import io
-import json
-import logging
+import csv
+import gzip
 import os
 import re
 import sys
+import textwrap
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.f-utures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Counter, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict, Counter
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger("log_aggregator")
 
 # ---------------------------------------------------------------------------
-# LOG PARSERS
-# ---------------------------------------------------------------------------
+logger = logging.getLogger("log_aggregator")
+
 
 class LogParser:
     """Base class for log parsers. Subclasses implement format-specific parsing."""
-
+    
     TIMESTAMP_PATTERNS = [
         (r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', 'iso8601'),
         (r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', 'standard'),
-        (r'^\[?\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2}', 'nginx'),
+    TIMESTAMP_PATTERNS = [
         (r'^\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}', 'syslog'),
     ]
 
-    LEVEL_PATTERNS = [
+    LEVEL_PATTERNS: List[Tuple[str, str]] = [
         (r'\b(ERROR|FATAL|CRITICAL)\b', 'error'),
         (r'\b(WARN|WARNING)\b', 'warn'),
         (r'\b(INFO|NOTICE)\b', 'info'),
-        (r'\b(DEBUG|TRACE)\b', 'debug'),
-    ]
-
+        (r'\b(ERROR|FATAL|CRITICAL)\b', 'error'),
+        (r'\b(WARN|WARNING)\b', 'warn'),
+        (r'\b(INFO|NOTICE)\b', 'info'),
     def parse(self, line: str) -> Optional[Dict[str, Any]]:
         raise NotImplementedError
 
-    def extract_timestamp(self, line: str) -> Optional[int]:
+    def extract_timestamp(self, line: str) -> Optional[datetime]:
+        for pattern, _ in self.TIMESTAMP_PATTERNS:
+            match = re.search(pattern, line)
+            if match:
         for pattern, _ in self.TIMESTAMP_PATTERNS:
             match = re.search(pattern, line)
             if match:
                 try:
                     dt_str = match.group(0)
                     for fmt in [
-                        '%Y-%m-%dT%H:%M:%S',
-                        '%Y-%m-%d %H:%M:%S',
-                        '%d/%b/%Y:%H:%M:%S',
                         '%b %d %H:%M:%S',
                     ]:
                         try:
-                            dt = datetime.strptime(dt_str, fmt)
-                            return int(dt.replace(tzinfo=timezone.utc).timestamp())
+                            dt = datetime.strptime(dt_str, fmt).replace(tzinfo=timezone.utc)
+                            return dt
                         except ValueError:
                             continue
-                except:
-                    pass
+                except Exception:
+                    continue
         return None
 
     def extract_level(self, line: str) -> str:
-        for pattern, level in self.LEVEL_PATTERNS:
+        return None
+
+            if re.search(pattern, line, re.IGNORECASE):
+                return leve
             if re.search(pattern, line, re.IGNORECASE):
                 return level
         return 'unknown'
