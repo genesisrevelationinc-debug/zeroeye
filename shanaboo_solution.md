@@ -1,13 +1,9 @@
- ```diff
+```diff
 --- /dev/null
 +++ b/tools/diagnostic_diff.py
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,237 @@
 +#!/usr/bin/env python3
-+"""
-+Diagnostic metadata diff tool.
-+
-+Compares two diagnostic metadata JSON files and prints a human-readable diff.
-+"""
++"""Compare two diagnostic metadata JSON files and print a human-readable diff."""
 +
 +import argparse
 +import json
@@ -16,174 +12,158 @@
 +from typing import Any
 +
 +
-+def load_json(path: Path) -> dict | None:
-+    """Load JSON from path, returning None on failure."""
++def load_json(path: str) -> dict[str, Any]:
++    """Load and parse a JSON file, exiting with error if missing or invalid."""
++    p = Path(path)
++    if not p.exists():
++        print(f"Error: file not found: {path}", file=sys.stderr)
++        sys.exit(1)
 +    try:
-+        with open(path, "r", encoding="utf-8") as f:
-+            return json.load(f)
-+    except (FileNotFoundError, json.JSONDecodeError, OSError):
-+        return None
++        with p.open("r", encoding="utf-8") as fh:
++            return json.load(fh)
++    except json.JSONDecodeError as exc:
++        print(f"Error: invalid JSON in {path}: {exc}", file=sys.stderr)
++        sys.exit(1)
 +
 +
-+def get_module_status(metadata: dict, module_name: str) -> str:
-+    """Get module status from metadata."""
-+    modules = metadata.get("modules", {})
-+    module = modules.get(module_name, {})
-+    return module.get("status", "unknown")
++def _module_key(module: dict) -> str:
++    """Return a stable sort key for a module entry."""
++    return module.get("name", module.get("module", ""))
 +
 +
-+def get_module_duration(metadata: dict, module_name: str) -> float | None:
-+    """Get module duration from metadata."""
-+    modules = metadata.get("modules", {})
-+    module = modules.get(module_name, {})
-+    return module.get("duration_seconds")
++def _index_modules(modules: list[dict]) -> dict[str, dict]:
++    """Build a name→module dict from a list of module objects."""
++    indexed: dict[str, dict] = {}
++    for mod in modules:
++        key = _module_key(mod)
++        if key:
++            indexed[key] = mod
++    return indexed
 +
 +
-+def get_module_command(metadata: dict, module_name: str) -> str | None:
-+    """Get module build command from metadata."""
-+    modules = metadata.get("modules", {})
-+    module = modules.get(module_name, {})
-+    return module.get("command")
++def _safe_get(mod: dict, *keys: str, default: Any = None) -> Any:
++    """Safely traverse nested keys in a dict."""
++    for key in keys:
++        if isinstance(mod, dict):
++            mod = mod.get(key, default)
++        else:
++            return default
++    return mod
 +
 +
-+def get_module_artifacts(metadata: dict, module_name: str) -> list[str]:
-+    """Get module artifact names from metadata."""
-+    modules = metadata.get("modules", {})
-+    module = modules.get(module_name, {})
-+    return module.get("artifacts", [])
++def _fmt_duration(seconds: float | None) -> str:
++    """Format a duration value for display."""
++    if seconds is None:
++        return "N/A"
++    return f"{seconds:.3f}s"
 +
 +
-+def format_duration(delta: float) -> str:
-+    """Format a duration delta with sign."""
-+    if delta > 0:
-+        return f"+{delta:.3f}s"
-+    return f"{delta:.3f}s"
++def _delta_str(old_val: Any, new_val: Any) -> str:
++    """Return a human-readable delta string."""
++    try:
++        old_f = float(old_val)
++        new_f = float(new_val)
++        delta = new_f - old_f
++        sign = "+" if delta >= 0 else ""
++        return f"{sign}{delta:.3f}s"
++    except (TypeError, ValueError):
++        return f"{old_val} → {new_val}"
 +
 +
-+def compare_modules(left: dict, right: dict) -> dict[str, Any]:
-+    """Compare two metadata dicts and return diff results."""
-+    left_modules = set(left.get("modules", {}).keys())
-+    right_modules = set(right.get("modules", {}).keys())
++def diff_modules(
++    old_modules: list[dict],
++    new_modules: list[dict],
++) -> dict[str, Any]:
++    """Compare two module lists and return a structured diff."""
++    old_idx = _index_modules(old_modules)
++    new_idx = _index_modules(new_modules)
 +
-+    added = sorted(right_modules - left_modules)
-+    removed = sorted(left_modules - right_modules)
-+    common = sorted(left_modules & right_modules)
++    old_names = set(old_idx.keys())
++    new_names = set(new_idx.keys())
 +
-+    status_changes = []
-+    duration_changes = []
-+    command_changes = []
-+    artifact_changes = []
++    added = sorted(new_names - old_names)
++    removed = sorted(old_names - new_names)
++    common = sorted(old_names & new_names)
 +
-+    for module_name in common:
-+        left_status = get_module_status(left, module_name)
-+        right_status = get_module_status(right, module_name)
-+        if left_status != right_status:
-+            status_changes.append({
-+                "module": module_name,
-+                "old": left_status,
-+                "new": right_status,
-+            })
++    changed: list[dict] = []
++    for name in common:
++        old_mod = old_idx[name]
++        new_mod = new_idx[name]
++        changes: dict[str, Any] = {}
 +
-+        left_duration = get_module_duration(left, module_name)
-+        right_duration = get_module_duration(right, module_name)
-+        if left_duration is not None and right_duration is not None:
-+            if left_duration != right_duration:
-+                duration_changes.append({
-+                    "module": module_name,
-+                    "old": left_duration,
-+                    "new": right_duration,
-+                    "delta": right_duration - left_duration,
-+                })
-+        elif left_duration is not None or right_duration is not None:
-+            duration_changes.append({
-+                "module": module_name,
-+                "old": left_duration,
-+                "new": right_duration,
-+                "delta": (right_duration or 0) - (left_duration or 0),
-+            })
++        # Status
++        old_status = _safe_get(old_mod, "status")
++        new_status = _safe_get(new_mod, "status")
++        if old_status != new_status:
++            changes["status"] = {"old": old_status, "new": new_status}
 +
-+        left_command = get_module_command(left, module_name)
-+        right_command = get_module_command(right, module_name)
-+        if left_command != right_command:
-+            command_changes.append({
-+                "module": module_name,
-+                "old": left_command,
-+                "new": right_command,
-+            })
++        # Duration
++        old_dur = _safe_get(old_mod, "duration_seconds", "duration")
++        new_dur = _safe_get(new_mod, "duration_seconds", "duration")
++        if old_dur != new_dur:
++            changes["duration"] = {"old": old_dur, "new": new_dur}
 +
-+        left_artifacts = set(get_module_artifacts(left, module_name))
-+        right_artifacts = set(get_module_artifacts(right, module_name))
-+        if left_artifacts != right_artifacts:
-+            artifact_changes.append({
-+                "module": module_name,
-+                "added": sorted(right_artifacts - left_artifacts),
-+                "removed": sorted(left_artifacts - right_artifacts),
-+            })
++        # Commands
++        old_cmd = _safe_get(old_mod, "command", "build_cmd")
++        new_cmd = _safe_get(new_mod, "command", "build_cmd")
++        if old_cmd != new_cmd:
++            changes["command"] = {"old": old_cmd, "new": new_cmd}
++
++        # Artifact names
++        old_art = _safe_get(old_mod, "artifact", "artifacts")
++        new_art = _safe_get(new_mod, "artifact", "artifacts")
++        if old_art != new_art:
++            changes["artifact"] = {"old": old_art, "new": new_art}
++
++        if changes:
++            changed.append({"name": name, "changes": changes})
 +
 +    return {
 +        "added": added,
 +        "removed": removed,
-+        "status_changes": status_changes,
-+        "duration_changes": duration_changes,
-+        "command_changes": command_changes,
-+        "artifact_changes": artifact_changes,
++        "changed": changed,
 +    }
 +
 +
-+def print_human_diff(diff: dict[str, Any], left_path: Path, right_path: Path) -> None:
-+    """Print human-readable diff."""
-+    print(f"Diff: {left_path} -> {right_path}")
-+    print()
++def print_human_diff(diff: dict[str, Any]) -> None:
++    """Print a human-readable diff to stdout."""
++    added = diff["added"]
++    removed = diff["removed"]
++    changed = diff["changed"]
 +
-+    if diff["added"]:
-+        print("Added modules:")
-+        for module in diff["added"]:
-+            print(f"  + {module}")
++    if not added and not removed and not changed:
++        print("No differences found between the two diagnostic files.")
++        return
++
++    if added:
++        print("=== Added Modules ===")
++        for name in added:
++            print(f"  + {name}")
 +        print()
 +
-+    if diff["removed"]:
-+        print("Removed modules:")
-+        for module in diff["removed"]:
-+            print(f"  - {module}")
++    if removed:
++        print("=== Removed Modules ===")
++        for name in removed:
++            print(f"  - {name}")
 +        print()
 +
-+    if diff["status_changes"]:
-+        print("Status changes:")
-+        for change in diff["status_changes"]:
-+            print(f"  {change['module']}: {change['old']} -> {change['new']}")
-+        print()
++    if changed:
++        print("=== Changed Modules ===")
++        for entry in changed:
++            name = entry["name"]
++            changes = entry["changes"]
++            print(f"  * {name}")
++            if "status" in changes:
++                print(f"      status:  {changes['status']['old']} → {changes['status']['new']}")
++            if "duration" in changes:
++                old_d = changes["duration"]["old"]
++                new_d = changes["duration"]["new"]
++                print(f"      duration: {_fmt_duration(old_d)} → {_fmt_duration(new_d)}  (Δ {_delta_str(old_d, new_d)})")
++            if "command" in changes:
++                print(f"      command:  {changes['command']['old']} → {changes['command']['new']}")
++            if "artifact" in changes:
++                print(f"      artifact: {changes['artifact']['old']} → {changes['artifact']['new']}")
++            print()
 +
-+    if diff["duration_changes"]:
-+        print("Duration changes:")
-+        for change in diff["duration_changes"]:
-+            delta_str = format_duration(change["delta"])
-+            print(f"  {change['module']}: {change['old']:.3f}s -> {change['new']:.3f}s ({delta_str})")
-+        print()
 +
-+    if diff["command_changes"]:
-+        print("Command changes:")
-+        for change in diff["command_changes"]:
-+            print(f"  {change['module']}:")
-+            print(f"    - {change['old']}")
-+            print(f"    + {change['new']}")
-+        print()
-+
-+    if diff["artifact_changes"]:
-+        print("Artifact changes:")
-+        for change in diff["artifact_changes"]:
-+            print(f"  {change['module']}:")
-+            if change["added"]:
-+                for artifact in change["added"]:
-+                    print(f"    + {artifact}")
-+            if change["removed"]:
-+                for artifact in change["removed"]:
-+                    print(f"    - {artifact}")
-+        print()
-+
-+    if not any([
-+        diff["added"],
-+        diff["removed"],
-+        diff["status_changes"],
-+        diff["duration_changes"],
-+        diff["command_changes"],
-+        diff["
++def main()
