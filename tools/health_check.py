@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 Health check tool for the Tent of Trials platform.
@@ -23,35 +24,37 @@ The health check performs the following checks:
 Each check returns a status of OK, WARNING, or CRITICAL, along with
 a detail message and optional diagnostic data.
 
-Usage:
-    python3 health_check.py                  # Check all services
     python3 health_check.py --service backend # Check specific service
     python3 health_check.py --json            # JSON output
     python3 health_check.py --watch           # Continuous monitoring
+    python3 health_check.py --retries 3 --timeout-secs 10 --backoff-secs 2 --json
 """
+
+import argparse
 
 import argparse
 import json
 import os
-import socket
-import ssl
 import subprocess
 import sys
 import time
+import http.client
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-# ---------------------------------------------------------------------------
-# CONSTANTS
+from typing import Any, Dict, List, Optional, Tuple
+
 # ---------------------------------------------------------------------------
 
 SERVICES = {
-    "backend": {"host": "localhost", "port": 8080, "path": "/health", "timeout": 5},
-    "market": {"host": "localhost", "port": 8081, "path": "/health", "timeout": 5},
-    "frailbox": {"host": "localhost", "port": 8082, "path": "/health", "timeout": 10},
-    "frontend": {"host": "localhost", "port": 3000, "path": "/", "timeout": 5},
+    "backend": {"host": "localhost", "port": 8080, "path": "/health", "timeout": 5, "retries": 0, "backoff_secs": 1},
+    "market": {"host": "localhost", "port": 8081, "path": "/health", "timeout": 5, "retries": 0, "backoff_secs": 1},
+    "frailbox": {"host": "localhost", "port": 8082, "path": "/health", "timeout": 10, "retries": 0, "backoff_secs": 1},
+    "frontend": {"host": "localhost", "port": 3000, "path": "/", "timeout": 5, "retries": 0, "backoff_secs": 1},
 }
 
+INFRASTRUCTURE = {
+    "postgresql": {"host": os.environ.get("DB_HOST", "localhost"), "port": int(os.environ.get("DB_PORT", "5432")), "timeout": 5},
 INFRASTRUCTURE = {
     "postgresql": {"host": os.environ.get("DB_HOST", "localhost"), "port": int(os.environ.get("DB_PORT", "5432")), "timeout": 5},
     "redis": {"host": os.environ.get("REDIS_HOST", "localhost"), "port": int(os.environ.get("REDIS_PORT", "6379")), "timeout": 5},
@@ -68,8 +71,7 @@ MEMORY_THRESHOLD_CRITICAL = 90
 # CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
 
-def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
-    import http.client
+def _single_http_check(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
     try:
         conn = http.client.HTTPConnection(host, port, timeout=timeout)
         conn.request("GET", path)
@@ -86,12 +88,68 @@ def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[s
             detail = f"HTTP {status}: {body[:100]}"
         else:
             result = "CRITICAL"
-            detail = f"HTTP {status}: {body[:100]}"
-
         return result, detail, status
     except Exception as e:
         return "CRITICAL", str(e), 0
 
+
+def check_http_service(
+    host: str,
+    port: int,
+    path: str,
+    timeout: int,
+    retries: int = 0,
+    backoff_secs: float = 1.0,
+) -> Tuple[str, str, int, List[Dict[str, Any]]]:
+    """
+    Perform an HTTP health check with optional retries for transient failures.
+
+    Retries are attempted only for:
+      - Network timeouts / connection errors
+      - HTTP 5xx responses
+
+    HTTP 4xx responses are considered permanent failures and are NOT retried.
+
+    Returns:
+        (status, detail, status_code, attempts)
+        attempts is a list of per-attempt dicts with keys:
+            attempt, elapsed_ms, status, detail, status_code
+    """
+    attempts: List[Dict[str, Any]] = []
+    last_result: Optional[Tuple[str, str, int]] = None
+
+    for attempt_num in range(retries + 1):
+        start = time.time()
+        result, detail, status_code = _single_http_check(host, port, path, timeout)
+        elapsed_ms = (time.time() - start) * 1000
+
+        attempts.append({
+            "attempt": attempt_num + 1,
+            "elapsed_ms": round(elapsed_ms, 2),
+            "status": result,
+            "detail": detail,
+            "status_code": status_code,
+        })
+
+        last_result = (result, detail, status_code)
+
+        # Do not retry if OK or WARNING (4xx)
+        if result in ("OK", "WARNING"):
+            break
+
+        # CRITICAL – decide whether to retry
+        if attempt_num < retries:
+            # Retry only for network errors or 5xx; 4xx is not retried
+            if status_code == 0 or status_code >= 500:
+                time.sleep(backoff_secs)
+                continue
+            # 4xx or other non-retryable critical – stop immediately
+            break
+
+    return (*last_result, attempts)
+
+
+def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
 
 def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
     try:
@@ -103,11 +161,11 @@ def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]
     except socket.timeout:
         return "CRITICAL", f"Connection timeout ({timeout}s)", 0
     except ConnectionRefusedError:
-        return "CRITICAL", "Connection refused", 0
-    except Exception as e:
         return "CRITICAL", str(e), 0
 
 
+def check_certificate_expiry(host: str,
+--- END FILE ---
 def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]:
     try:
         ctx = ssl.create_default_context()
