@@ -1,13 +1,10 @@
-# Tent ofpulse of Trials
+# Tent of Trials
 
 <p align="center">
-  <a href="https://github.com/lobster-trap/zeroeye/actions"><img src="https://img.shields.io/github/actions/workflow/status/lobster-trap/zeroeye/ci.yml?style=flat-square" alt="Build Status"></a>
-  <a href="https://github.com/lobster-trap/zeroeye/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lobster-trap/zeroeye?style=flat-square" alt="License"></a>
-  <a href="https://github.com/lobster-trap/zeroeye/pulse"><img src="https://img.shields.io/github/languages/top/lobster-trap/zeroeye?style=flat-square" alt="Top Language"></a>
-  <a href="https://github.com/lobster-trap/zeroeye/search?l=python"><img src="https://img.shields.io/badge/code%20style-black-000000?style=flat-square" alt="Code Style"></a>
-</p>
-
-<p align="center">
+  <a href="https://github.com/lobster-trap/TentOfTrials/actions"><img src="https://img.shields.io/github/actions/workflow/status/lobster-trap/TentOfTrials/ci.yml?style=flat-square" alt="Build Status"></a>
+  <a href="https://github.com/lobster-trap/TentOfTrials/blob/main/.editorconfig"><img src="https://img.shields.io/badge/code%20style-editorconfig-ff69b4.svg?style=flat-square" alt="Code Style"></a>
+  <a href="https://github.com/lobster-trap/TentOfTrials/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lobster-trap/TentOfTrials?style=flat-square" alt="License"></a>
+  <a href="https://github.com/lobster-trap/TentOfTrials"><img src="https://img.shields.io/github/languages/top/lobster-trap/TentOfTrials?style=flat-square" alt="Top Language"></a>
 </p>
 
 Trading and risk platform.
