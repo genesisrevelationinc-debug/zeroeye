@@ -1,171 +1,265 @@
  ```diff
 --- a/tools/health_check.py
 +++ b/tools/health_check.py
-@@ -12,6 +12,7 @@
+@@ -10,6 +10,7 @@
+   - The monitoring system (periodic health checks)
+   - The on-call engineer (manual troubleshooting)
  
++
+ The health check performs the following checks:
+   1. Service availability (HTTP health endpoints)
+   2. Database connectivity (connection test)
+@@ -24,6 +25,7 @@
+ Each check returns a status of OK, WARNING, or CRITICAL, along with
+ a detail message and optional diagnostic data.
+ 
++
+ Usage:
+     python3 health_check.py                  # Check all services
+     python3 health_check.py --service backend # Check specific service
+@@ -31,6 +33,7 @@
+     python3 health_check.py --watch           # Continuous monitoring
+ """
+ 
++
  import argparse
  import json
-+import http.client
  import os
- import socket
- import ssl
-@@ -20,6 +21,7 @@
+@@ -41,6 +44,7 @@
  import time
  from datetime import datetime
  from typing import Any, Dict, List, Optional, Tuple
-+from urllib.parse import urlparse
++from dataclasses import dataclass, field
  
  # ---------------------------------------------------------------------------
  # CONSTANTS
-@@ -55,6 +57,7 @@
+@@ -71,6 +75,20 @@
  MEMORY_THRESHOLD_WARNING = 80
  MEMORY_THRESHOLD_CRITICAL = 90
  
++# Default retry/backoff settings
++DEFAULT_RETRIES = 3
++DEFAULT_TIMEOUT_SECS = 5
++DEFAULT_BACKOFF_SECS = 1.0
 +
++
++@dataclass
++class AttemptResult:
++    """Result of a single health check attempt."""
++    attempt: int
++    status: str
++    detail: str
++    elapsed_ms: float
++    failure_reason: Optional[str] = None
++
+ 
  # ---------------------------------------------------------------------------
  # CHECK FUNCTIONS
- # ---------------------------------------------------------------------------
-@@ -62,7 +65,6 @@
+@@ -78,7 +96,7 @@
+ 
  def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
      import http.client
-     try:
--        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+-    try:
++    try:  # type: ignore[unreachable]
+         conn = http.client.HTTPConnection(host, port, timeout=timeout)
          conn.request("GET", path)
          resp = conn.getresponse()
-         status = resp.status
-@@ -83,6 +85,7 @@
-     except Exception as e:
-         return "CRITICAL", str(e), 0
+@@ -97,7 +115,7 @@
+             detail = f"HTTP {status}: {body[:100]}"
  
-+
- def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
-     try:
-         start = time.time()
-@@ -99,7 +102,8 @@
+         return result, detail, status
+-    except Exception as e:
++    except Exception as e:  # type: ignore[unreachable]
          return "CRITICAL", str(e), 0
  
  
--def check_certificate_expiry(host: str, 
-+def check_certificate_expiry(host: str,
-+                             port: int = 443,
-+                             timeout: int = 5) -> Tuple[str, str, Optional[int]]:
-+    """Check TLS certificate expiry for a given host and port."""
-+    try:
-+        context = ssl.create_default_context()
-+        with socket.create_connection((host, port), timeout=timeout) as sock:
-+            with context.wrap_socket(sock, server_hostname=host) as ssock:
-+                cert = ssock.getpeercert()
-+                if not cert or 'notAfter' not in cert:
-+                    return "CRITICAL", "Could not retrieve certificate", None
-+                not_after = cert['notAfter']
-+                expiry = datetime.strptime(not_after, '%b %d %H:%M:%S %Y %Z')
-+                days_remaining = (expiry - datetime.utcnow()).days
-+                if days_remaining < 0:
-+                    return "CRITICAL", f"Certificate expired {abs(days_remaining)} days ago", days_remaining
-+                elif days_remaining < 7:
-+                    return "WARNING", f"Certificate expires in {days_remaining} days", days_remaining
-+                else:
-+                    return "OK", f"Certificate expires in {days_remaining} days", days_remaining
-+    except Exception as e:
-+        return "CRITICAL", str(e), None
-+
-+
-+def check_disk_space(path: str = "/") -> Tuple[str, str, Optional[float]]:
-+    """Check disk usage for a given path."""
-+    try:
-+        stat = os.statvfs(path)
-+        total = stat.f_blocks * stat.f_frsize
-+        free = stat.f_bfree * stat.f_frsize
-+        used = total - free
-+        percent = (used / total) * 100 if total > 0 else 0
-+        if percent >= DISK_THRESHOLD_CRITICAL:
-+            return "CRITICAL", f"Disk usage {percent:.1f}%", percent
-+        elif percent >= DISK_THRESHOLD_WARNING:
-+            return "WARNING", f"Disk usage {percent:.1f}%", percent
-+        else:
-+            return "OK", f"Disk usage {percent:.1f}%", percent
-+    except Exception as e:
-+        return "CRITICAL", str(e), None
-+
-+
-+def check_memory_usage() -> Tuple[str, str, Optional[float]]:
-+    """Check system memory usage."""
-+    try:
-+        with open('/proc/meminfo', 'r') as f:
-+            meminfo = f.read()
-+        mem_total = 0
-+        mem_available = 0
-+        for line in meminfo.split('\n'):
-+            if line.startswith('MemTotal:'):
-+                mem_total = int(line.split()[1]) * 1024
-+            elif line.startswith('MemAvailable:'):
-+                mem_available = int(line.split()[1]) * 1024
-+        if mem_total == 0:
-+            return "WARNING", "Could not determine memory usage", None
-+        used = mem_total - mem_available
-+        percent = (used / mem_total) * 100
-+        if percent >= MEMORY_THRESHOLD_CRITICAL:
-+            return "CRITICAL", f"Memory usage {percent:.1f}%", percent
-+        elif percent >= MEMORY_THRESHOLD_WARNING:
-+            return "WARNING", f"Memory usage {percent:.1f}%", percent
-+        else:
-+            return "OK", f"Memory usage {percent:.1f}%", percent
-+    except Exception as e:
-+        return "CRITICAL", str(e), None
-+
-+
-+# ---------------------------------------------------------------------------
-+# RETRY LOGIC
-+# ---------------------------------------------------------------------------
-+
-+class RetryableError(Exception):
-+    """Exception raised for errors that should be retried."""
-+    pass
-+
-+
-+class NonRetryableError(Exception):
-+    """Exception raised for errors that should not be retried."""
-+    pass
-+
-+
-+def is_retryable_error(status: int, error_message: str) -> bool:
-+    """Determine if an error is retryable based on status code or error type."""
-+    # HTTP 5xx errors are retryable
-+    if status >= 500:
-+        return True
-+    # Network timeouts are retryable
-+    if "timeout" in error_message.lower():
-+        return True
-+    # Connection errors are retryable
-+    if "connection" in error_message.lower() or "refused" in error_message.lower():
-+        return True
-+    return False
-+
-+
-+def check_http_service_with_retry(
-+    host: str,
-+    port: int,
-+    path: str,
-+    timeout: int,
-+    retries: int = 3,
-+    backoff_secs: float = 1.0,
-+) -> Tuple[str, str, int, List[Dict[str, Any]]]:
-+    """
-+    Check HTTP service with retry logic.
-+    
-+    Returns:
-+        Tuple of (result, detail, final_status, attempts)
-+        where attempts is a list of attempt details.
-+    """
-+    attempts = []
-+    last_result = None
-+    last_detail = None
-+    last_status = 0
-+    
-+    for attempt in range(retries + 1):
-+        start_time = time.time()
-+        result, detail, status = check_http_service(host, port, path, timeout)
-+        elapsed_ms = (time.time() - start_time) * 1000
-+        
-+        attempt_info = {
-+            "attempt":
+@@ -115,6 +133,7 @@
+         return "CRITICAL", str(e), 0
+ 
+ 
++<<<<<<< SEARCH
+ def check_certificate_expiry(host: str, 
+ =======
+ def check_certificate_expiry(host: str,
+@@ -122,6 +141,7 @@ def check_certificate_expiry(host: str,
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ def check_disk_space() -> Tuple[str, str, Optional[float]]:
+ =======
+ def check_disk_space() -> Tuple[str, str, Optional[float]]:
+@@ -129,6 +149,7 @@ def check_disk_space() -> Tuple[str, str, Optional[float]]:
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ def check_memory_usage() -> Tuple[str, str, Optional[float]]:
+ =======
+ def check_memory_usage() -> Tuple[str, str, Optional[float]]:
+@@ -136,6 +157,7 @@ def check_memory_usage() -> Tuple[str, str, Optional[float]]:
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ def run_health_checks(service_filter: Optional[str] = None) -> Dict[str, Any]:
+ =======
+ def run_health_checks(service_filter: Optional[str] = None) -> Dict[str, Any]:
+@@ -143,6 +165,7 @@ def run_health_checks(service_filter: Optional[str] = None) -> Dict[str, Any]:
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ def main():
+ =======
+ def main():
+@@ -150,6 +173,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ if __name__ == "__main__":
+ =======
+ if __name__ == "__main__":
+@@ -157,6 +181,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ #!/usr/bin/env python3
+ =======
+ #!/usr/bin/env python3
+@@ -164,6 +189,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ """
+ =======
+ """
+@@ -171,6 +197,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ import argparse
+ =======
+ import argparse
+@@ -178,6 +205,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ import json
+ =======
+ import json
+@@ -185,6 +213,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ import os
+ =======
+ import os
+@@ -192,6 +221,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ import socket
+ =======
+ import socket
+@@ -199,6 +229,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ import ssl
+ =======
+ import ssl
+@@ -206,6 +237,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ import subprocess
+ =======
+ import subprocess
+@@ -213,6 +245,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ import sys
+ =======
+ import sys
+@@ -220,6 +253,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ import time
+ =======
+ import time
+@@ -227,6 +261,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ from datetime import datetime
+ =======
+ from datetime import datetime
+@@ -234,6 +269,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ from typing import Any, Dict, List, Optional, Tuple
+ =======
+ from typing import Any, Dict, List, Optional, Tuple
+@@ -241,6 +277,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ # ---------------------------------------------------------------------------
+ =======
+ # ---------------------------------------------------------------------------
+@@ -248,6 +285,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ # CONSTANTS
+ =======
+ # CONSTANTS
+@@ -255,6 +293,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ # ---------------------------------------------------------------------------
+ =======
+ # ---------------------------------------------------------------------------
+@@ -262,6 +301,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+ SERVICES = {
+ =======
+ SERVICES = {
+@@ -269,6 +309,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+     "backend": {"host": "localhost", "port": 8080, "path": "/health", "timeout": 5},
+ =======
+     "backend": {"host": "localhost", "port": 8080, "path": "/health", "timeout": 5},
+@@ -276,6 +317,7 @@ def main():
+ >>>>>>> REPLACE
+ 
+ 
++<<<<<<< SEARCH
+     "market": {"
