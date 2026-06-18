@@ -1,5 +1,15 @@
 # Tent of Trials
 
+<p align="center">
+  <a href="https://github.com/lobster-trap/zeroeye/actions"><img src="https://img.shields.io/github/actions/workflow/status/lobster-trap/zeroeye/ci.yml?style=flat-square" alt="Build Status"></a>
+  <a href="https://github.com/lobster-trap/zeroeye/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lobster-trap/zeroeye?style=flat-square" alt="License"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.75+-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+  <a href="https://prettier.io/"><img src="https://img.shields.io/badge/code_style-prettier-ff69b4?style=flat-square&logo=prettier&logoColor=white" alt="Code Style: Prettier"></a>
+</p>
+
+<br>
+
 Trading and risk platform.
 
 ## Getting Started
