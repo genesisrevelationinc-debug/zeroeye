@@ -1,11 +1,13 @@
 # Tent of Trials
+
 <p align="center">
-  <a href="https://github.com/lobster-trap/zeroeye/actions"><img src="https://img.shields.io/github/actions/workflow/status/lobster-trap/zeroeye/ci.yml?style=flat-square" alt="Build Status"></a>
-  <a href="https://github.com/lobster-trap/zeroeye/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lobster-trap/zeroeye?style=flat-square" alt="License"></a>
-  <a href="https://github.com/lobster-trap/zeroeye"><img src="https://img.shields.io/github/languages/top/lobster-trap/zeroeye?style=flat-square" alt="Top Language"></a>
-  <a href="https://github.com/lobster-trap/zeroeye"><img src="https://img.shields.io/badge/code%20style-editorconfig-blue?style=flat-square" alt="Code Style"></a>
+  <a href="https://github.com/lobster-trap/TentOfTrials/actions"><img src="https://img.shields.io/github/actions/workflow/status/lobster-trap/TentOfTrials/ci.yml?style=flat-square" alt="Build Status"></a>
+  <a href="https://github.com/lobster-trap/TentOfTrials/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lobster-trap/TentOfTrials?style=flat-square" alt="License"></a>
+  <a href="https://github.com/lobster-trap/TentOfTrials"><img src="https://img.shields.io/badge/code%20style-editorconfig-blue?style=flat-square" alt="Code Style"></a>
+  <a href="https://github.com/lobster-trap/TentOfTrials"><img src="https://img.shields.io/badge/stack-Python%20%7C%20Rust%20%7C%20TypeScript%20%7C%20Go%20%7C%20C%2FC%2B%2B%20%7C%20Java%20%7C%20Ruby%20%7C%20Lua%20%7C%20Haskell-informational?style=flat-square" alt="Tech Stack"></a>
 </p>
 
+<br>
 
 Trading and risk platform.
 
