@@ -9,42 +9,44 @@ This tool is used by:
   - The deployment pipeline (post-deployment validation)
   - The monitoring system (periodic health checks)
   - The on-call engineer (manual troubleshooting)
+  - The monitoring system (periodic health checks)
+  - The on-call engineer (manual troubleshooting)
 
 
 The health check performs the following checks:
   1. Service availability (HTTP health endpoints)
   2. Database connectivity (connection test)
-  3. Redis connectivity (ping test)
-  4. Kafka connectivity (metadata fetch)
   5. Message queue depth (consumer lag check)
   6. Certificate expiry (TLS certificate check)
   7. Disk space (filesystem usage check)
   8. Memory usage (process memory check)
 
 Each check returns a status of OK, WARNING, or CRITICAL, along with
+
+Each check returns a status of OK, WARNING, or CRITICAL, along with
+a detail message and optional diagnostic data.
+Retry and backoff support is available for transient network failures.
+
 Usage:
     python3 health_check.py                  # Check all services
-    python3 health_check.py --service backend # Check specific service
-    python3 health_check.py --retries 3 --timeout-secs 5 --backoff-secs 2  # With retry policy
+    python3 health_check.py --watch           # Continuous monitoring
     python3 health_check.py --json            # JSON output
     python3 health_check.py --watch           # Continuous monitoring
 """
-    python3 health_check.py --watch           # Continuous monitoring
-"""
+from __future__ import annotations
+
 
 import argparse
 import json
-import os
-import socket
 import ssl
+import subprocess
+import ssl
+import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
-from http import HTTPStatus
 from typing import Any, Dict, List, Optional, Tuple
-
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # CONSTANTS
 # ---------------------------------------------------------------------------
 
@@ -73,53 +75,112 @@ MEMORY_THRESHOLD_CRITICAL = 90
 
 def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
     import http.client
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+MEMORY_THRESHOLD_WARNING = 80
+MEMORY_THRESHOLD_CRITICAL = 90
+
+# Global lock for thread-safe printing
+_print_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
 # CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
-
-
+        if status == 200:
 def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
     import http.client
     try:
-        conn.close()
-
-        resp = conn.getresponse()
-        status = resp.status
-        body = resp.read().decode("utf-8", errors="replace")[:200]
-        conn.close()
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)  # type: ignore[attr-defined]
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            status = resp.status
+            body = resp.read().decode("utf-8", errors="replace")[:200]
+        finally:
+            conn.close()
 
         if status == 200:
             result = "OK"
-        else:
-            result = "CRITICAL"
+            detail = f"HTTP {status}"
+        elif status < 500:
+            result = "WARNING"
             detail = f"HTTP {status}: {body[:100]}"
-
+        else:
             result = "CRITICAL"
             detail = f"HTTP {status}: {body[:100]}"
 
         return result, detail, status
     except Exception as e:
         return "CRITICAL", str(e), 0
+
+
+def check_http_service_with_retry(
+    host: str,
+    port: int,
+    path: str,
+    timeout: int,
+    retries: int,
+    backoff_secs: float,
+) -> Tuple[str, str, int, List[Dict[str, Any]]]:
+    """Check HTTP service with retry and backoff for transient failures."""
+    attempts: List[Dict[str, Any]] = []
+    for attempt in range(retries + 1):
         start = time.time()
-        sock = socket.create_connection((host, port), timeout=timeout)
-        sock.close()
-        latency = (time.time() - start) * 1000
-        return "OK", f"Connected ({latency:.1f}ms)", latency
-    except socket.timeout:
-        return "CRITICAL", f"Connection timeout ({timeout}s)", 0
-    except ConnectionRefusedError:
-        return "CRITICAL", "Connection refused", 0
-    except Exception as e:
-        return "CRITICAL", str(e), 0
+        result, detail, status = check_http_service(host, port, path, timeout)
+        elapsed_ms = (time.time() - start) * 1000
+        attempts.append({
+            "attempt": attempt + 1,
+            "elapsed_ms": round(elapsed_ms, 2),
+            "result": result,
+            "detail": detail,
+            "status": status,
+        })
+        if result == "OK" or (status >= 400 and status < 500):
+            break
+        if attempt < retries and (status >= 500 or status == 0):
+            time.sleep(backoff_secs)
+    return result, detail, status, attempts
+
+
+def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
+    try:
 
 
 def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]:
-    except Exception as e:
         return "CRITICAL", str(e), 0
 
 
-def check_certificate_expiry(host: str, port: int = 443, timeout: int = 5) -> Tuple[str, str, int]:
-    try:
-        context = ssl.create_default_context()
+def check_tcp_port_with_retry(
+    host: str,
+    port: int,
+    timeout: int,
+    retries: int,
+    backoff_secs: float,
+) -> Tuple[str, str, float, List[Dict[str, Any]]]:
+    """Check TCP port with retry and backoff for transient failures."""
+    attempts: List[Dict[str, Any]] = []
+    for attempt in range(retries + 1):
+        start = time.time()
+        result, detail, latency = check_tcp_port(host, port, timeout)
+        elapsed_ms = (time.time() - start) * 1000
+        attempts.append({
+            "attempt": attempt + 1,
+            "elapsed_ms": round(elapsed_ms, 2),
+            "result": result,
+            "detail": detail,
+            "latency_ms": round(latency, 2) if latency else None,
+        })
+        if result == "OK":
+            break
+        # Retry on timeout or connection refused (transient network issues)
+        if attempt < retries and ("timeout" in detail.lower() or "refused" in detail.lower()):
+            time.sleep(backoff_secs)
+    return result, detail, latency, attempts
+
+
+def check_certificate_expiry(host: str, 
+                cert = ssock.getpeercert()
+                if not cert:
                     return "WARNING", "No certificate found", 0
 
                 from datetime import datetime as dt
@@ -133,13 +194,12 @@ def check_certificate_expiry(host: str, port: int = 443, timeout: int = 5) -> Tu
                 else:
                     return "CRITICAL", f"Certificate expires in {days_left} days", days_left
     except Exception as e:
-    except Exception as e:
-        return "CRITICAL", str(e), 0
+        return "WARNING", f"Cannot check: {e}", 0
 
 
-def check_disk_space(path: str = "/") -> Tuple[str, str, float]:
+def check_disk_usage(path: str = "/") -> Tuple[str, str, float]:
     try:
-        usage = shutil.disk_usage(path)
+        stat = os.statvfs(path)
         total = stat.f_frsize * stat.f_blocks
         free = stat.f_frsize * stat.f_bavail
         used = total - free
@@ -148,13 +208,12 @@ def check_disk_space(path: str = "/") -> Tuple[str, str, float]:
         if pct < DISK_THRESHOLD_WARNING:
             return "OK", f"{pct:.1f}% used ({used // (1024**3)}GB/{total // (1024**3)}GB)", pct
         elif pct < DISK_THRESHOLD_CRITICAL:
+            return "WARNING", f"{pct:.1f}% used ({used // (1024**3)}GB/{total // (1024**3)}GB)", pct
+        else:
+            return "CRITICAL", f"{pct:.1f}% used ({used // (1024**3)}GB/{total // (1024**3)}GB)", pct
     except Exception as e:
-        return "CRITICAL", str(e), 0
+        return "WARNING", f"Cannot check: {e}", 0
 
-
-def check_memory_usage() -> Tuple[str, str, float]:
-    try:
-        with open("/proc/meminfo", "r") as f:
 
 def check_memory_usage() -> Tuple[str, str, float]:
     try:
@@ -172,13 +231,12 @@ def check_memory_usage() -> Tuple[str, str, float]:
 
         total = meminfo.get("MemTotal", 0)
         available = meminfo.get("MemAvailable", 0)
-    except Exception as e:
-        return "CRITICAL", str(e), 0
+        used = total - available
+        pct = (used / total) * 100 if total > 0 else 0
 
-
-def check_kafka_lag() -> Tuple[str, str, int]:
-    try:
-        result = subprocess.run(
+        if pct < MEMORY_THRESHOLD_WARNING:
+            return "OK", f"{pct:.1f}% used ({used // (1024**3)}GB/{total // (1024**3)}GB)", pct
+        elif pct < MEMORY_THRESHOLD_CRITICAL:
             return "WARNING", f"{pct:.1f}% used", pct
         else:
             return "CRITICAL", f"{pct:.1f}% used", pct
@@ -188,13 +246,12 @@ def check_kafka_lag() -> Tuple[str, str, int]:
 
 def check_load_average() -> Tuple[str, str, float]:
     try:
-    except Exception as e:
-        return "CRITICAL", str(e), 0
+        with open("/proc/loadavg") as f:
+            parts = f.read().strip().split()
+            load = float(parts[0])
+            cpu_count = os.cpu_count() or 1
+            load_pct = (load / cpu_count) * 100
 
-
-def check_message_queue_depth() -> Tuple[str, str, int]:
-    try:
-        result = subprocess.run(
             if load_pct < 70:
                 return "OK", f"Load: {load} ({load_pct:.0f}% of {cpu_count} cores)", load
             elif load_pct < 90:
@@ -204,36 +261,33 @@ def check_message_queue_depth() -> Tuple[str, str, int]:
     except Exception as e:
         return "WARNING", f"Cannot check: {e}", 0
 
-    except Exception as e:
-        return "CRITICAL", str(e), 0
 
+# ---------------------------------------------------------------------------
+# HEALTH CHECK RUNNER
+# ---------------------------------------------------------------------------
 
-def check_all_services(services: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    results = {}
-    for name, config in services.items():
+def run_health_checks(service: Optional[str] = None, json_output: bool = False) -> Dict[str, Any]:
     results: Dict[str, Any] = {
         "timestamp": datetime.now().isoformat(),
         "hostname": socket.gethostname(),
         "services": {},
         "infrastructure": {},
-        }
-    return results
+        "system": {},
+        "overall_status": "OK",
+    }
 
+    all_ok = True
 
-def check_all_infrastructure(infra: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    results = {}
-    for name, config in infra.items():
     # Check services
     for name, config in SERVICES.items():
         if service and name != service:
             continue
-        }
-    return results
-
-
-def check_system() -> Dict[str, Any]:
-    results = {}
-    results["disk"] = {
+        status, detail, code = check_http_service(
+            config["host"], config["port"], config["path"], config["timeout"]
+        )
+        results["services"][name] = {
+            "status": status,
+            "detail": detail,
             "code": code,
             "endpoint": f"http://{config['host']}:{config['port']}{config['path']}",
         }
@@ -246,59 +300,54 @@ def check_system() -> Dict[str, Any]:
             continue
         status, detail, latency = check_tcp_port(config["host"], config["port"], config["timeout"])
         results["infrastructure"][name] = {
-    }
-    return results
-
-
-def check_kafka() -> Dict[str, Any]:
-    results = {}
-    results["lag"] = {
+            "status": status,
+            "detail": detail,
+            "endpoint": f"{config['host']}:{config['port']}",
+        }
+        if status == "CRITICAL":
+            all_ok = False
 
     # Check system resources
     disk_status, disk_detail, disk_pct = check_disk_usage()
     results["system"]["disk"] = {"status": disk_status, "detail": disk_detail}
     if disk_status == "CRITICAL":
-    }
-    return results
+        all_ok = False
 
-
-def check_message_queue() -> Dict[str, Any]:
-    results = {}
-    results["depth"] = {
+    mem_status, mem_detail, mem_pct = check_memory_usage()
+    results["system"]["memory"] = {"status": mem_status, "detail": mem_detail}
+    if mem_status == "CRITICAL":
+        all_ok = False
 
     load_status, load_detail, load_val = check_load_average()
     results["system"]["load"] = {"status": load_status, "detail": load_detail}
 
     # Check certificate expiry (web services)
-    }
-    return results
-
-
-def check_certificates(services: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    results = {}
-    for name, config in services.items():
+    for name, config in SERVICES.items():
+        if service and name != service:
+            continue
+        if config["port"] == 443:
+            cert_status, cert_detail, days_left = check_certificate_expiry(config["host"])
+            results["services"][name]["certificate"] = {
                 "status": cert_status,
                 "detail": cert_detail,
                 "days_remaining": days_left,
             }
-        }
+            if cert_status == "CRITICAL":
+                all_ok = False
+
+    results["overall_status"] = "OK" if all_ok else "DEGRADED"
+
     return results
-
-
-def run_all_checks(services: Dict[str, Dict[str, Any]], infra: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    results = {}
-    results["services"] = check_all_services(services)
 
 
 def print_health_report(results: Dict[str, Any]):
     print(f"\n{'='*60}")
-    results["certificates"] = check_certificates(services)
-    return results
+    print(f"  HEALTH CHECK REPORT")
+    print(f"  Host: {results['hostname']}")
+    print(f"  Time: {results['timestamp']}")
+    print(f"  Overall: {results['overall_status']}")
+    print(f"{'='*60}")
 
-
-def format_results(results: Dict[str, Any], json_output: bool = False) -> str:
-    if json_output:
-        return json.dumps(results, indent=2)
     for category, items in [("Services", results["services"]),
                              ("Infrastructure", results["infrastructure"]),
                              ("System", results["system"])]:
@@ -310,30 +359,27 @@ def format_results(results: Dict[str, Any], json_output: bool = False) -> str:
                     print(f"    {status_icon} {name}: {check['detail']}")
                 else:
                     print(f"    {name}:")
-        lines.append(f"  Overall: {overall}")
-    return "\n".join(lines)
+                    for sub_name, sub_check in check.items():
+                        if isinstance(sub_check, dict) and "status" in sub_check:
+                            sub_icon = {"OK": "✓", "WARNING": "⚠", "CRITICAL": "✗"}.get(sub_check["status"], "?")
+                            print(f"      {sub_icon} {sub_name}: {sub_check['detail']}")
+    print()
 
-
-def watch_mode(services: Dict[str, Dict[str, Any]], infra: Dict[str, Dict[str, Any]], interval: int = 30, json_output: bool = False):
-    try:
-        while True:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Health check tool")
     parser.add_argument("--service", "-s", help="Check specific service only")
     parser.add_argument("--json", "-j", action="store_true", help="JSON output")
-    except KeyboardInterrupt:
-        print("\nWatch mode stopped.")
+    parser.add_argument("--watch", "-w", action="store_true", help="Continuous monitoring")
+    parser.add_argument("--interval", "-i", type=int, default=30, help="Check interval in seconds")
+    parser.add_argument("--output", "-o", help="Output file path")
+    return parser.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Health check tool for Tent of Trials")
-    parser.add_argument("--service", help="Check specific service")
-def main():
-    parser.add_argument("--watch", action="store_true", help="Continuous monitoring")
-    parser.add_argument("--interval", type=int, default=30, help="Watch interval in seconds")
-    parser.add_argument("--json", action="store_true", help="JSON output")
-    parser.add走吧，我帮你继续完成这个 diff。从之前中断的地方继续：
+    args = parse_args()
+
+    if args.watch:
         print(f"Continuous monitoring (interval: {args.interval}s). Press Ctrl+C to stop.")
         try:
             while True:
