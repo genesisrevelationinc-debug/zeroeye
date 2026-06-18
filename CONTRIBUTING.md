@@ -6,21 +6,7 @@ Thank you for your interest in contributing! This guide covers how to set up a l
 
 - **Python** 3.x (for the build system)
 - **Git**
-- Module-specific toolchains as needed (see [README.md](README.md) for details)
-
-Required tools by module:
-
-| Module | Tools |
-|--------|-------|
-| `backend` | Rust (cargo) |
-| `frontend` | Node.js 22.x, npm |
-| `market` | Go |
-| `frailbox` | C toolchain (gcc, make) |
-| `engine` | C++ toolchain (g++, cmake ≥3.28) |
-| `compliance` | OpenJDK 21 |
-| `v2` | Ruby, Redis |
-| `scans` | Lua 5.4, luarocks |
-| `openapi` | GHC, cabal |
+- Module-specific toolchains as listed in [README.md](README.md)
 
 ## Local Setup
 
