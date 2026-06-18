@@ -1,9 +1,13 @@
  ```diff
 --- /dev/null
 +++ b/tools/diagnostic_diff.py
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,268 @@
 +#!/usr/bin/env python3
-+"""Compare two diagnostic metadata JSON files and print a human-readable diff."""
++"""
++Diagnostic metadata diff tool.
++
++Compares two diagnostic metadata JSON files and prints a human-readable diff.
++"""
 +
 +import argparse
 +import json
@@ -12,158 +16,174 @@
 +from typing import Any
 +
 +
-+def load_json(path: Path) -> dict:
-+    """Load and return JSON from a file path."""
-+    with open(path, "r", encoding="utf-8") as f:
-+        return json.load(f)
++def load_json(path: Path) -> dict | None:
++    """Load JSON from path, returning None on failure."""
++    try:
++        with open(path, "r", encoding="utf-8") as f:
++            return json.load(f)
++    except (FileNotFoundError, json.JSONDecodeError, OSError):
++        return None
 +
 +
-+def get_module_info(metadata: dict, module_name: str) -> dict:
-+    """Extract relevant fields for a module from metadata."""
++def get_module_status(metadata: dict, module_name: str) -> str:
++    """Get module status from metadata."""
 +    modules = metadata.get("modules", {})
-+    info = modules.get(module_name, {})
-+    return {
-+        "status": info.get("status", "unknown"),
-+        "duration_ms": info.get("duration_ms", 0),
-+        "command": info.get("command", ""),
-+        "artifact": info.get("artifact", ""),
-+    }
++    module = modules.get(module_name, {})
++    return module.get("status", "unknown")
 +
 +
-+def format_duration_delta(old_ms: float, new_ms: float) -> str:
-+    """Format a duration delta with sign and percentage."""
-+    delta = new_ms - old_ms
-+    if old_ms == 0:
-+        if new_ms == 0:
-+            return "0ms"
-+        return f"+{new_ms}ms (from 0)"
-+    pct = ((new_ms - old_ms) / old_ms) * 100
-+    sign = "+" if delta >= 0 else ""
-+    return f"{sign}{delta:.1f}ms ({sign}{pct:.1f}%)"
++def get_module_duration(metadata: dict, module_name: str) -> float | None:
++    """Get module duration from metadata."""
++    modules = metadata.get("modules", {})
++    module = modules.get(module_name, {})
++    return module.get("duration_seconds")
 +
 +
-+def compare_modules(old_meta: dict, new_meta: dict) -> dict:
-+    """Compare modules between two metadata files and return structured diff."""
-+    old_modules = set(old_meta.get("modules", {}).keys())
-+    new_modules = set(new_meta.get("modules", {}).keys())
++def get_module_command(metadata: dict, module_name: str) -> str | None:
++    """Get module build command from metadata."""
++    modules = metadata.get("modules", {})
++    module = modules.get(module_name, {})
++    return module.get("command")
 +
-+    added = []
-+    removed = []
-+    changed = []
++
++def get_module_artifacts(metadata: dict, module_name: str) -> list[str]:
++    """Get module artifact names from metadata."""
++    modules = metadata.get("modules", {})
++    module = modules.get(module_name, {})
++    return module.get("artifacts", [])
++
++
++def format_duration(delta: float) -> str:
++    """Format a duration delta with sign."""
++    if delta > 0:
++        return f"+{delta:.3f}s"
++    return f"{delta:.3f}s"
++
++
++def compare_modules(left: dict, right: dict) -> dict[str, Any]:
++    """Compare two metadata dicts and return diff results."""
++    left_modules = set(left.get("modules", {}).keys())
++    right_modules = set(right.get("modules", {}).keys())
++
++    added = sorted(right_modules - left_modules)
++    removed = sorted(left_modules - right_modules)
++    common = sorted(left_modules & right_modules)
++
++    status_changes = []
 +    duration_changes = []
++    command_changes = []
++    artifact_changes = []
 +
-+    for mod in sorted(new_modules - old_modules):
-+        info = get_module_info(new_meta, mod)
-+        added.append({
-+            "name": mod,
-+            "status": info["status"],
-+            "duration_ms": info["duration_ms"],
-+            "command": info["command"],
-+            "artifact": info["artifact"],
-+        })
++    for module_name in common:
++        left_status = get_module_status(left, module_name)
++        right_status = get_module_status(right, module_name)
++        if left_status != right_status:
++            status_changes.append({
++                "module": module_name,
++                "old": left_status,
++                "new": right_status,
++            })
 +
-+    for mod in sorted(old_modules - new_modules):
-+        info = get_module_info(old_meta, mod)
-+        removed.append({
-+            "name": mod,
-+            "status": info["status"],
-+            "duration_ms": info["duration_ms"],
-+            "command": info["command"],
-+            "artifact": info["artifact"],
-+        })
++        left_duration = get_module_duration(left, module_name)
++        right_duration = get_module_duration(right, module_name)
++        if left_duration is not None and right_duration is not None:
++            if left_duration != right_duration:
++                duration_changes.append({
++                    "module": module_name,
++                    "old": left_duration,
++                    "new": right_duration,
++                    "delta": right_duration - left_duration,
++                })
++        elif left_duration is not None or right_duration is not None:
++            duration_changes.append({
++                "module": module_name,
++                "old": left_duration,
++                "new": right_duration,
++                "delta": (right_duration or 0) - (left_duration or 0),
++            })
 +
-+    for mod in sorted(old_modules & new_modules):
-+        old_info = get_module_info(old_meta, mod)
-+        new_info = get_module_info(new_meta, mod)
++        left_command = get_module_command(left, module_name)
++        right_command = get_module_command(right, module_name)
++        if left_command != right_command:
++            command_changes.append({
++                "module": module_name,
++                "old": left_command,
++                "new": right_command,
++            })
 +
-+        changes = {}
-+        if old_info["status"] != new_info["status"]:
-+            changes["status"] = {
-+                "old": old_info["status"],
-+                "new": new_info["status"],
-+            }
-+        if old_info["command"] != new_info["command"]:
-+            changes["command"] = {
-+                "old": old_info["command"],
-+                "new": new_info["command"],
-+            }
-+        if old_info["artifact"] != new_info["artifact"]:
-+            changes["artifact"] = {
-+                "old": old_info["artifact"],
-+                "new": new_info["artifact"],
-+            }
-+        if old_info["duration_ms"] != new_info["duration_ms"]:
-+            changes["duration"] = {
-+                "old_ms": old_info["duration_ms"],
-+                "new_ms": new_info["duration_ms"],
-+                "delta_ms": new_info["duration_ms"] - old_info["duration_ms"],
-+            }
-+
-+        if changes:
-+            changed.append({
-+                "name": mod,
-+                "changes": changes,
++        left_artifacts = set(get_module_artifacts(left, module_name))
++        right_artifacts = set(get_module_artifacts(right, module_name))
++        if left_artifacts != right_artifacts:
++            artifact_changes.append({
++                "module": module_name,
++                "added": sorted(right_artifacts - left_artifacts),
++                "removed": sorted(left_artifacts - right_artifacts),
 +            })
 +
 +    return {
 +        "added": added,
 +        "removed": removed,
-+        "changed": changed,
++        "status_changes": status_changes,
++        "duration_changes": duration_changes,
++        "command_changes": command_changes,
++        "artifact_changes": artifact_changes,
 +    }
 +
 +
-+def print_human_diff(diff: dict, old_path: Path, new_path: Path) -> None:
-+    """Print a human-readable diff."""
-+    print(f"Diagnostic diff: {old_path} -> {new_path}")
++def print_human_diff(diff: dict[str, Any], left_path: Path, right_path: Path) -> None:
++    """Print human-readable diff."""
++    print(f"Diff: {left_path} -> {right_path}")
 +    print()
 +
 +    if diff["added"]:
-+        print("=== Added modules ===")
-+        for mod in diff["added"]:
-+            print(f"  + {mod['name']}: {mod['status']} ({mod['duration_ms']}ms)")
-+            if mod["command"]:
-+                print(f"    command: {mod['command']}")
-+            if mod["artifact"]:
-+                print(f"    artifact: {mod['artifact']}")
++        print("Added modules:")
++        for module in diff["added"]:
++            print(f"  + {module}")
 +        print()
 +
 +    if diff["removed"]:
-+        print("=== Removed modules ===")
-+        for mod in diff["removed"]:
-+            print(f"  - {mod['name']}: {mod['status']} ({mod['duration_ms']}ms)")
++        print("Removed modules:")
++        for module in diff["removed"]:
++            print(f"  - {module}")
 +        print()
 +
-+    if diff["changed"]:
-+        print("=== Changed modules ===")
-+        for mod in diff["changed"]:
-+            print(f"  ~ {mod['name']}")
-+            changes = mod["changes"]
-+            if "status" in changes:
-+                print(f"    status: {changes['status']['old']} -> {changes['status']['new']}")
-+            if "command" in changes:
-+                print(f"    command: {changes['command']['old']} -> {changes['command']['new']}")
-+            if "artifact" in changes:
-+                print(f"    artifact: {changes['artifact']['old']} -> {changes['artifact']['new']}")
-+            if "duration" in changes:
-+                d = changes["duration"]
-+                delta_str = format_duration_delta(d["old_ms"], d["new_ms"])
-+                print(f"    duration: {d['old_ms']}ms -> {d['new_ms']}ms ({delta_str})")
++    if diff["status_changes"]:
++        print("Status changes:")
++        for change in diff["status_changes"]:
++            print(f"  {change['module']}: {change['old']} -> {change['new']}")
 +        print()
 +
-+    if not any(diff.values()):
-+        print("No differences found.")
++    if diff["duration_changes"]:
++        print("Duration changes:")
++        for change in diff["duration_changes"]:
++            delta_str = format_duration(change["delta"])
++            print(f"  {change['module']}: {change['old']:.3f}s -> {change['new']:.3f}s ({delta_str})")
++        print()
 +
++    if diff["command_changes"]:
++        print("Command changes:")
++        for change in diff["command_changes"]:
++            print(f"  {change['module']}:")
++            print(f"    - {change['old']}")
++            print(f"    + {change['new']}")
++        print()
 +
-+def main() -> int:
-+    parser = argparse.ArgumentParser(description="Compare two diagnostic metadata JSON files.")
-+    parser.add_argument("old", help="Path to the old diagnostic metadata JSON file")
-+    parser.add_argument("new", help="Path to the new diagnostic metadata JSON file")
-+    parser.add_argument("--json", action="store_true", help="Output machine-readable JSON diff")
-+    args = parser.parse_args()
++    if diff["artifact_changes"]:
++        print("Artifact changes:")
++        for change in diff["artifact_changes"]:
++            print(f"  {change['module']}:")
++            if change["added"]:
++                for artifact in change["added"]:
++                    print(f"    + {artifact}")
++            if change["removed"]:
++                for artifact in change["removed"]:
++                    print(f"    - {artifact}")
++        print()
 +
-+    old_path = Path(args.old)
-+    new_path = Path(args.new)
-+
-+    if not old_path.exists():
-+        print(f"Error: File not found: {old_path}", file=sys.stderr)
-+        return 1
++    if not any([
++        diff["added"],
++        diff["removed"],
++        diff["status_changes"],
++        diff["duration_changes"],
++        diff["command_changes"],
++        diff["
