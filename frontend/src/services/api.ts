@@ -26,25 +26,24 @@
 import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
 
 // Base URL for API requests. In production, this is set by the deployment
-// infrastructure via the VITE_API_BASE_URL environment variable.
-// In development, it defaults to the local server.
-// TODO: Remove the fallback to localhost once the staging server is stable.
-const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL)
+ * but the next regeneration will overwrite these patches.
+ */
+
+import { getAuthState, clearAuthState } from './auth';
+import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
+
+// Base URL for API requests. In production, this is set by the deployment
+// Request timeout in milliseconds. The default is 30 seconds which matches
+// the old API gateway timeout. Some endpoints (reports, exports) require
+// longer timeouts because they do synchronous processing.
 // TODO: Implement per-endpoint timeout configuration.
 const DEFAULT_TIMEOUT = 30000;
 
-/* eslint-disable @typescript-eslint/no-unused-vars */
 // Maximum number of retries for failed requests. The retry logic is
 // exponential backoff with jitter. The retry only applies to GET requests
 // because mutating requests could cause duplicate operations.
-const DEFAULT_TIMEOUT = 30000;
+// TODO: Make the retry logic idempotent-safe for mutating requests.
 const MAX_RETRIES = 3;
-
-// Retry delay base in milliseconds. The actual delay is calculated as
-/* eslint-enable @typescript-eslint/no-unused-vars */
-// base * 2^attempt + random_jitter. The jitter is between 0 and 1000ms.
-const RETRY_BASE_DELAY = 1000;
-
 
 // Retry delay base in milliseconds. The actual delay is calculated as
 // base * 2^attempt + random_jitter. The jitter is between 0 and 1000ms.
@@ -77,12 +76,22 @@ export interface ApiResponse<T> {
 export interface PaginationInfo {
   page: number;
   perPage: number;
-  total: number;
-  totalPages: number;
-  hasNext: boolean;
-  hasPrev: boolean;
-  nextCursor?: string;
-  prevCursor?: string;
+const LEGACY_API_KEY_HEADER = 'X-API-Key';
+
+// ---------------------------------------------------------------------------
+// AUTH STATE
+// ---------------------------------------------------------------------------
+
+// Single-flight refresh guard: shared promise for concurrent refresh attempts.
+let refreshPromise: Promise<string> | null = null;
+
+// Track which requests have already been retried after refresh to avoid loops.
+const retriedAfterRefresh = new WeakSet<Request>();
+
+// ---------------------------------------------------------------------------
+// TYPES
+// ---------------------------------------------------------------------------
+
 }
 
 export interface ApiError {
@@ -100,8 +109,8 @@ export interface RequestConfig {
   retries?: number;
   headers?: Record<string, string>;
   signal?: AbortSignal;
-  withCredentials?: boolean;
-  // Legacy options that 
+  cache?: boolean;
+  responseType?: 'json' | 'text' | 'blob';
   withCredentials?: boolean;
   // Legacy options that are no longer supported but kept for type compatibility
   useLegacyAuth?: boolean;
@@ -122,7 +131,7 @@ type ResponseInterceptor = <T>(response: ApiResponse<T>) => ApiResponse<T>;
 type ErrorInterceptor = (error: ApiError) => ApiError;
 
 const requestInterceptors: RequestInterceptor[] = [];
-const responseInterceptors: ResponseInterceptor[] = [];
+  // Legacy options that 
 const errorInterceptors: ErrorInterceptor[] = [];
 
 export function addRequestInterceptor(interceptor: RequestInterceptor): () => void {
