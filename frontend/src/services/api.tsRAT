@@ -1,0 +1,16 @@
+// been updated. We send both the legacy and new auth headers.
+const LEGACY_API_KEY_HEADER = 'X-API-Key';
+
+// Single-flight refresh guard: shared promise for concurrent refresh attempts.
+let refreshPromise: Promise<string> | null = null;
+
+// Track which requests have already been retried after refresh to avoid loops.
+const retriedAfterRefresh = new WeakSet<Request>();
+
+// Refresh endpoint path. Used to detect refresh requests and avoid loops.
+const REFRESH_ENDPOINT = '/auth/refresh';
+
+// ---------------------------------------------------------------------------
+// TYPES
+// ---------------------------------------------------------------------------
+  // Legacy options that 
