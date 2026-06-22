@@ -7,13 +7,13 @@ the overall system status.
 This tool is used by:
   - The Kubernetes liveness/readiness probes
   - The deployment pipeline (post-deployment validation)
+  - The monitoring system (periodic health checks)
   - The on-call engineer (manual troubleshooting)
 
+
 The health check performs the following checks:
-  0. HTTP probes with retry, backoff, and circuit breaker
   1. Service availability (HTTP health endpoints)
   2. Database connectivity (connection test)
-  3. Redis connectivity (ping test)
   3. Redis connectivity (ping test)
   4. Kafka connectivity (metadata fetch)
   5. Message queue depth (consumer lag check)
@@ -22,6 +22,7 @@ The health check performs the following checks:
   8. Memory usage (process memory check)
 
 Each check returns a status of OK, WARNING, or CRITICAL, along with
+a detail message and optional diagnostic data.
 Each check returns a status of OK, WARNING, or CRITICAL, along with
 a detail message and optional diagnostic data.
 
@@ -29,28 +30,28 @@ a detail message and optional diagnostic data.
 Usage:
     python3 health_check.py                  # Check all services
     python3 health_check.py --service backend # Check specific service
-    python3 health_check.py --watch           # Continuous monitoring
+"""
     python3 health_check.py --watch           # Continuous monitoring
 """
 
-from __future__ import annotations
+
 import argparse
 import json
 import os
-import ssl
 import subprocess
 import sys
 import time
+from datetime import datetime
+import sys
 import time
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
-import logging
+
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
-
-SERVICES = {
-    "backend": {"host": "localhost", "port": 8080, "path": "/health", "timeout": 5},
+# ---------------------------------------------------------------------------
     "market": {"host": "localhost", "port": 8081, "path": "/health", "timeout": 5},
     "frailbox": {"host": "localhost", "port": 8082, "path": "/health", "timeout": 10},
     "frontend": {"host": "localhost", "port": 3000, "path": "/", "timeout": 5},
@@ -69,36 +70,23 @@ MEMORY_THRESHOLD_WARNING = 80
 MEMORY_THRESHOLD_CRITICAL = 90
 
 # ---------------------------------------------------------------------------
-DISK_THRESHOLD_WARNING = 80
-DISK_THRESHOLD_CRITICAL = 90
-
-DEFAULT_MAX_RETRIES = 3
-DEFAULT_BACKOFF_FACTOR = 2.0
-DEFAULT_BASE_DELAY = 1.0
-DEFAULT_CIRCUIT_THRESHOLD = 5
-DEFAULT_CIRCUIT_COOLDOWN = 30.0
-
+# CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
-# LOGGING
-# ---------------------------------------------------------------------------
+MEMORY_THRESHOLD_WARNING = 80
+MEMORY_THRESHOLD_CRITICAL = 90
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("health_check")
 
 # ---------------------------------------------------------------------------
 # CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
-        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        resp = conn.getresponse()
 def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
     import http.client
     try:
-        # Single attempt (legacy)
         conn = http.client.HTTPConnection(host, port, timeout=timeout)
         conn.request("GET", path)
         resp = conn.getresponse()
-        if status == 200:
-            result = "OK"
-            detail = f"HTTP {status}"
+        status = resp.status
         elif status < 500:
             result = "WARNING"
             detail = f"HTTP {status}: {body[:100]}"
@@ -110,30 +98,26 @@ def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[s
     except Exception as e:
         return "CRITICAL", str(e), 0
 
+
+def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
+    except Exception as e:
         return "CRITICAL", str(e), 0
-
-
 
 def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
     try:
         start = time.time()
-        latency = (time.time() - start) * 1000
-        return "OK", f"Connected ({latency:.1f}ms)", latency
-    except socket.timeout:
         return "CRITICAL", f"Connection timeout ({timeout}s)", 0
     except ConnectionRefusedError:
         return "CRITICAL", "Connection refused", 0
     except Exception as e:
         return "CRITICAL", str(e), 0
 
+
+def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]:
+    except Exception as e:
         return "CRITICAL", str(e), 0
 
-
-
 def check_certificate_expiry(host: str, 
-        with socket.create_connection((host, port), timeout=10) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                cert = ssock.getpeercert()
                 if not cert:
                     return "WARNING", "No certificate found", 0
 
