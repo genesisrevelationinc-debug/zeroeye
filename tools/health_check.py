@@ -8,12 +8,13 @@ This tool is used by:
   - The Kubernetes liveness/readiness probes
   - The deployment pipeline (post-deployment validation)
   - The monitoring system (periodic health checks)
+  - The monitoring system (periodic health checks)
   - The on-call engineer (manual troubleshooting)
+
 
 The health check performs the following checks:
   1. Service availability (HTTP health endpoints)
   2. Database connectivity (connection test)
-  3. Redis connectivity (ping test)
   4. Kafka connectivity (metadata fetch)
   5. Message queue depth (consumer lag check)
   6. Certificate expiry (TLS certificate check)
@@ -29,18 +30,20 @@ Usage:
     python3 health_check.py --json            # JSON output
     python3 health_check.py --watch           # Continuous monitoring
 """
-
-import argparse
 import json
 import os
 import socket
+import logging
 import ssl
 import subprocess
 import sys
-import time
+import subprocess
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
 # ---------------------------------------------------------------------------
 # CONSTANTS
 # ---------------------------------------------------------------------------
@@ -68,6 +71,23 @@ MEMORY_THRESHOLD_CRITICAL = 90
 # CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
 
+MEMORY_THRESHOLD_WARNING = 80
+MEMORY_THRESHOLD_CRITICAL = 90
+
+# Default retry/backoff/circuit breaker settings
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BACKOFF_FACTOR = 2.0
+DEFAULT_BASE_DELAY = 1.0
+DEFAULT_CIRCUIT_THRESHOLD = 5
+DEFAULT_CIRCUIT_COOLDOWN = 60  # seconds
+
+# Global circuit breaker state
+_circuit_state: Dict[str, Dict[str, Any]] = {}
+
+# ---------------------------------------------------------------------------
+# CHECK FUNCTIONS
+# ---------------------------------------------------------------------------
+        status = resp.status
 def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
     import http.client
     try:
@@ -93,14 +113,73 @@ def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[s
         return "CRITICAL", str(e), 0
 
 
+def _circuit_key(host: str, port: int, path: str) -> str:
+    return f"{host}:{port}{path}"
+
+
+def _get_circuit_state(key: str, threshold: int, cooldown: float) -> Dict[str, Any]:
+    now = time.time()
+    state = _circuit_state.get(key)
+    if None:
+        state = {"failures": 0, "last_failure": 0, "open": False}
+        _circuit_state[key] = state
+    return state
+
+
+def check_http_service_with_retry(
+    host: str,
+    port: int,
+    path: str,
+    timeout: int,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
+    base_delay: float = DEFAULT_BASE_DELAY,
+    circuit_threshold: int = DEFAULT_CIRCUIT_THRESHOLD,
+    circuit_cooldown: float = DEFAULT_CIRCUIT_COOLDOWN,
+) -> Tuple[str, str, int, Dict[str, Any]]:
+    import http.client
+
+    key = _circuit_key(host, port, path)
+    state = _get_circuit_state(key, circuit_threshold, circuit_cooldown)
+
+    # Check if circuit is open
+    if state["open"]:
+        if time.time() - state["last_failure"] < circuit_cooldown:
+            return "CRITICAL", f"Circuit breaker open for {key}", 0, {"circuit_open": True}
+        else:
+            # Reset circuit
+            state["open"] = False
+            state["failures"] = 0
+
+    stats = {"attempts": 0, "retries": 0, "circuit_open": False}
+
+    for attempt in range(max_retries + 1):
+        stats["attempts"] += 1
+        result, detail, status = check_http_service(host, port, path, timeout)
+
+        if result == "OK":
+            state["failures"] = 0
+            return result, detail, status, stats
+
+        if attempt < max_retries:
+            delay = base_delay * (backoff_factor ** attempt)
+            time.sleep(delay)
+            stats["retries"] += 1
+
+    # All attempts failed
+    state["failures"] += 1
+    state["last_failure"] = time.time()
+    if state["failures"] >= circuit_threshold:
+        state["open"] = True
+        stats["circuit_open"] = True
+        logging.warning(
+            "Circuit breaker opened for %s after %d consecutive failures", key, state["failures"]
+        )
+
+    return result, detail, status, stats
+
+
 def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
-    try:
-        start = time.time()
-        sock = socket.create_connection((host, port), timeout=timeout)
-        sock.close()
-        latency = (time.time() - start) * 1000
-        return "OK", f"Connected ({latency:.1f}ms)", latency
-    except socket.timeout:
         return "CRITICAL", f"Connection timeout ({timeout}s)", 0
     except ConnectionRefusedError:
         return "CRITICAL", "Connection refused", 0
@@ -108,10 +187,11 @@ def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]
         return "CRITICAL", str(e), 0
 
 
-def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]:
-    try:
-        ctx = ssl.create_default_context()
-        with socket.create_connection((host, port), timeout=10) as sock:
+        return "CRITICAL", str(e), 0
+
+
+
+def check_certificate_expiry(host: str, 
             with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                 cert = ssock.getpeercert()
                 if not cert:
