@@ -15,12 +15,13 @@ The health check performs the following checks:
   2. Database connectivity (connection test)
   3. Redis connectivity (ping test)
   4. Kafka connectivity (metadata fetch)
-  5. Message queue depth (consumer lag check)
-  6. Certificate expiry (TLS certificate check)
-  7. Disk space (filesystem usage check)
-  8. Memory usage (process memory check)
-
-Each check returns a status of OK, WARNING, or CRITICAL, along with
+import argparse
+import json
+import os
+import random
+import socket
+import ssl
+import subprocess
 a detail message and optional diagnostic data.
 
 Usage:
@@ -77,20 +78,23 @@ def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[s
         status = resp.status
         body = resp.read().decode("utf-8", errors="replace")[:200]
         conn.close()
+MEMORY_THRESHOLD_WARNING = 80
+MEMORY_THRESHOLD_CRITICAL = 90
 
-        if status == 200:
-            result = "OK"
-            detail = f"HTTP {status}"
-        elif status < 500:
-            result = "WARNING"
+DEFAULT_RETRY_COUNT = 0
+DEFAULT_BACKOFF_INTERVAL = 1.0
+# ---------------------------------------------------------------------------
+# CHECK FUNCTIONS
+# ---------------------------------------------------------------------------
             detail = f"HTTP {status}: {body[:100]}"
         else:
-            result = "CRITICAL"
-            detail = f"HTTP {status}: {body[:100]}"
-
-        return result, detail, status
-    except Exception as e:
-        return "CRITICAL", str(e), 0
+    import http.client
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        status = resp.status
+        body = resp.read().decode("utf-8", errors="replace")[:200]
 
 
 def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
@@ -108,9 +112,10 @@ def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]
         return "CRITICAL", str(e), 0
 
 
-def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]:
+
+def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
     try:
-        ctx = ssl.create_default_context()
+        start = time.time()
         with socket.create_connection((host, port), timeout=10) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                 cert = ssock.getpeercert()
@@ -121,10 +126,11 @@ def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]
                 expires = dt.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
                 days_left = (expires - dt.now()).days
 
-                if days_left > 30:
-                    return "OK", f"Certificate expires in {days_left} days", days_left
-                elif days_left > 7:
-                    return "WARNING", f"Certificate expires in {days_left} days", days_left
+        return "CRITICAL", str(e), 0
+
+
+
+def check_certificate_expiry(host: str, 
                 else:
                     return "CRITICAL", f"Certificate expires in {days_left} days", days_left
     except Exception as e:
