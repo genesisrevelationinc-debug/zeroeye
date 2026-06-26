@@ -1,46 +1,49 @@
  ```diff
 --- a/tools/health_check.py
 +++ b/tools/health_check.py
-@@ -1,4 +1,4 @@
--#!/usr/bin/env python3
-+#!/usr/bin/env python3
- """
- Health check tool for the Tent of Trials platform.
- Performs comprehensive health checks across all services and reports
-@@ -21,6 +21,7 @@
+@@ -12,6 +12,7 @@
+   - The on-call engineer (manual troubleshooting)
  
+ The health check performs the following checks:
++  0. HTTP probe resilience (retry, backoff, circuit breaker)
+   1. Service availability (HTTP health endpoints)
+   2. Database connectivity (connection test)
+   3. Redis connectivity (ping test)
+@@ -24,6 +25,7 @@
+ 
+ Usage:
+     python3 health_check.py                  # Check all services
++    python3 health_check.py --max-retries 3 --backoff-factor 2.0 --circuit-threshold 5
+     python3 health_check.py --service backend # Check specific service
+     python3 health_check.py --json            # JSON output
+     python3 health_check.py --watch           # Continuous monitoring
+@@ -32,6 +34,7 @@
  import argparse
  import json
-+import logging
  import os
++import random
  import socket
  import ssl
-@@ -30,6 +31,7 @@
+ import subprocess
+@@ -39,6 +42,7 @@
+ import time
  from datetime import datetime
  from typing import Any, Dict, List, Optional, Tuple
++from dataclasses import dataclass, field
  
-+
  # ---------------------------------------------------------------------------
  # CONSTANTS
- # ---------------------------------------------------------------------------
-@@ -55,6 +57,15 @@
+@@ -68,6 +72,9 @@
  MEMORY_THRESHOLD_WARNING = 80
  MEMORY_THRESHOLD_CRITICAL = 90
  
-+# Default retry/backoff/circuit breaker settings
-+DEFAULT_MAX_RETRIES = 3
-+DEFAULT_BACKOFF_FACTOR = 2.0
-+DEFAULT_BASE_DELAY = 1.0
-+DEFAULT_CIRCUIT_THRESHOLD = 5
-+DEFAULT_CIRCUIT_COOLDOWN = 60.0
-+
-+# Circuit breaker state storage
-+_circuit_breaker_state: Dict[str, Dict[str, Any]] = {}
++# Circuit breaker state storage (global for process lifetime)
++_CIRCUIT_STATE: Dict[str, Dict[str, Any]] = {}
 +
  # ---------------------------------------------------------------------------
  # CHECK FUNCTIONS
  # ---------------------------------------------------------------------------
-@@ -86,6 +97,155 @@ def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[
+@@ -97,6 +104,181 @@
          return "CRITICAL", str(e), 0
  
  
@@ -49,62 +52,62 @@
 +    port: int,
 +    path: str,
 +    timeout: int,
-+    max_retries: int = DEFAULT_MAX_RETRIES,
-+    backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
-+    base_delay: float = DEFAULT_BASE_DELAY,
-+    circuit_threshold: int = DEFAULT_CIRCUIT_THRESHOLD,
-+    circuit_cooldown: float = DEFAULT_CIRCUIT_COOLDOWN,
-+    service_name: str = "",
++    max_retries: int = 0,
++    backoff_factor: float = 1.0,
++    circuit_threshold: int = 5,
++    circuit_cooldown: float = 60.0,
++    service_name: Optional[str] = None,
 +) -> Tuple[str, str, int, Dict[str, Any]]:
 +    """
-+    Check HTTP service with retry, exponential backoff, and circuit breaker.
-+    
-+    Returns: (result, detail, status, metadata)
-+    metadata includes: attempts, total_delay_ms, circuit_state, etc.
++    Perform an HTTP health check with retry, exponential backoff, and circuit breaker.
++
++    Returns:
++        (status, detail, http_status, metadata)
 +    """
 +    import http.client
-+    import math
++
++    # Unique circuit key per endpoint
++    circuit_key = f"{host}:{port}{path}"
++    now = time.time()
++
++    # Initialize or get circuit breaker state
++    if circuit_key not in _CIRCUIT_STATE:
++        _CIRCUIT_STATE[circuit_key] = {
++            "failures": 0,
++            "last_failure_time": 0,
++            "state": "CLOSED",  # CLOSED, OPEN, HALF_OPEN
++        }
++
++    cb_state = _CIRCUIT_STATE[circuit_key]
++
++    # Check if circuit is OPEN
++    if cb_state["state"] == "OPEN":
++        elapsed = now - cb_state["last_failure_time"]
++        if elapsed < circuit_cooldown:
++            return (
++                "CRITICAL",
++                f"Circuit breaker OPEN for {circuit_key} (cooldown {circuit_cooldown - elapsed:.1f}s remaining)",
++                0,
++                {
++                    "circuit_state": "OPEN",
++                    "retries": 0,
++                    "total_delay": 0.0,
++                },
++            )
++        else:
++            # Transition to HALF_OPEN
++            cb_state["state"] = "HALF_OPEN"
 +
 +    metadata: Dict[str, Any] = {
-+        "attempts": 0,
-+        "total_delay_ms": 0.0,
-+        "circuit_state": "closed",
-+        "retried": False,
++        "retries": 0,
++        "total_delay": 0.0,
++        "circuit_state": cb_state["state"],
 +    }
 +
-+    # Circuit breaker key
-+    cb_key = f"{host}:{port}{path}"
-+    if cb_key not in _circuit_breaker_state:
-+       bak = _circuit_breaker_state[cb_key] = {
-+            "failures": 0,
-+            "last_failure_time": 0.0,
-+            "state": "closed",
-+        }
-+    else:
-+        bak = _circuit_breaker_state[cb_key]
-+
-+    # Check if circuit is open
-+    now = time.time()
-+    if bak["state"] == "open":
-+        elapsed = now - bak["last_failure_time"]
-+        if elapsed < circuit_cooldown:
-+            metadata["circuit_state"] = "open"
-+            return "CRITICAL", f"Circuit breaker OPEN (cooldown {circuit_cooldown - elapsed:.1f}s remaining)", 0, metadata
-+        else:
-+            # Half-open: allow one request
-+            bak["state"] = "half-open"
-+            metadata["circuit_state"] = "half-open"
-+    else:
-+        metadata["circuit_state"] = bak["state"]
-+
-+    last_result = "CRITICAL"
-+    last_detail = "Unknown error"
-+    last_status = 0
-+    total_delay = 0.0
++    last_result: Optional[Tuple[str, str, int]] = None
++    base_delay = 1.0  # Base delay in seconds
 +
 +    for attempt in range(max_retries + 1):
-+        metadata["attempts"] = attempt + 1
-+        
 +        try:
 +            conn = http.client.HTTPConnection(host, port, timeout=timeout)
 +            conn.request("GET", path)
@@ -123,59 +126,56 @@
 +                result = "CRITICAL"
 +                detail = f"HTTP {status}: {body[:100]}"
 +
-+            last_result, last_detail, last_status = result, detail, status
++            last_result = (result, detail, status)
 +
++            # If successful, reset circuit breaker
 +            if result in ("OK", "WARNING"):
-+                # Success: reset circuit breaker
-+                bak["failures"] = 0
-+                bak["state"] = "closed"
-+                metadata["circuit_state"] = "closed"
-+                metadata["total_delay_ms"] = total_delay * 1000
-+                if attempt > 0:
-+                    metadata["retried"] = True
++                cb_state["failures"] = 0
++                cb_state["state"] = "CLOSED"
++                metadata["circuit_state"] = "CLOSED"
 +                return result, detail, status, metadata
 +
++            # CRITICAL but may retry
++            if attempt < max_retries:
++                delay = base_delay * (backoff_factor ** attempt)
++                # Add jitter to avoid thundering herd
++                delay = delay * (0.5 + random.random())
++                metadata["total_delay"] += delay
++                time.sleep(delay)
++                metadata["retries"] += 1
++                continue
++            else:
++                break
++
 +        except Exception as e:
-+            last_result = "CRITICAL"
-+            last_detail = str(e)
-+            last_status = 0
++            last_result = ("CRITICAL", str(e), 0)
++            if attempt < max_retries:
++                delay = base_delay * (backoff_factor ** attempt)
++                delay = delay * (0.5 + random.random())
++                metadata["total_delay"] += delay
++                time.sleep(delay)
++                metadata["retries"] += 1
++                continue
++            else:
++                break
 +
-+        # Failed this attempt, calculate backoff
-+        if attempt < max_retries:
-+            delay = base_delay * (backoff_factor ** attempt)
-+            total_delay += delay
-+            time.sleep(delay)
++    # All retries exhausted or immediate failure
++    if last_result is None:
++        last_result = ("CRITICAL", "Unknown failure", 0)
 +
-+    # All retries exhausted
-+    metadata["total_delay_ms"] = total_delay * 1000
-+    metadata["retried"] = True
++    # Update circuit breaker on failure
++    cb_state["failures"] += 1
++    cb_state["last_failure_time"] = time.time()
 +
-+    # Update circuit breaker
-+    bak["failures"] += 1
-+    bak["last_failure_time"] = time.time()
-+    
-+    if bak["failures"] >= circuit_threshold:
-+        bak["state"] = "open"
-+        metadata["circuit_state"] = "open"
++    if cb_state["failures"] >= circuit_threshold:
++        cb_state["state"] = "OPEN"
++        metadata["circuit_state"] = "OPEN"
 +    else:
-+        metadata["circuit_state"] = bak["state"]
++        cb_state["state"] = "CLOSED" if cb_state["failures"] == 0 else "CLOSED"
++        metadata["circuit_state"] = cb_state["state"]
 +
-+    return last_result, last_detail, last_status, metadata
++    # If we transitioned to OPEN, reflect that
++    if cb_state["state"] == "OPEN":
++        return (
++            last_result[0],
 +
-+
-+def check_http_service_simple(
-+    host: str, port: int, path: str, timeout: int, **kwargs
-+) -> Tuple[str, str, int]:
-+    """
-+    Simple wrapper for check_http_service_with_retry that returns the standard 3-tuple.
-+    """
-+    result, detail, status, _ = check_http_service_with_retry(
-+        host, port, path, timeout, **kwargs
-+    )
-+    return result, detail, status
-+
-+
- def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
-     try:
-         start = time.time()
-@@ -102,6 +262,7 @@ def check_tcp_port(host: str, port: int, timeout
