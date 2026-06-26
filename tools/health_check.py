@@ -28,19 +28,21 @@ Usage:
     python3 health_check.py                  # Check all services
     python3 health_check.py --service backend # Check specific service
     python3 health_check.py --json            # JSON output
-    python3 health_check.py --watch           # Continuous monitoring
-"""
-
-import argparse
 import json
 import os
 import socket
+import random
 import ssl
 import subprocess
 import sys
-import time
+import socket
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
@@ -64,6 +66,7 @@ DISK_THRESHOLD_CRITICAL = 90
 
 MEMORY_THRESHOLD_WARNING = 80
 MEMORY_THRESHOLD_CRITICAL = 90
+
 
 # ---------------------------------------------------------------------------
 # CHECK FUNCTIONS
@@ -106,10 +109,11 @@ def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]
     except ConnectionRefusedError:
         return "CRITICAL", "Connection refused", 0
     except Exception as e:
+    except Exception as e:
         return "CRITICAL", str(e), 0
 
 
-def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]:
+def check_certificate_expiry(host: str, 
     try:
         ctx = ssl.create_default_context()
         with socket.create_connection((host, port), timeout=10) as sock:
