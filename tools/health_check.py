@@ -23,35 +23,33 @@ The health check performs the following checks:
 
 Each check returns a status of OK, WARNING, or CRITICAL, along with
 a detail message and optional diagnostic data.
-Each check returns a status of OK, WARNING, or CRITICAL, along with
-a detail message and optional diagnostic data.
-
 
 Usage:
     python3 health_check.py                  # Check all services
     python3 health_check.py --service backend # Check specific service
-"""
-    python3 health_check.py --watch           # Continuous monitoring
-"""
-
-
-import argparse
+    python3 health_check.py --json            # JSON output
 import json
 import os
+import socket
+import random
+import ssl
 import subprocess
 import sys
-import time
+import socket
 from datetime import datetime
-import sys
-import time
-from datetime import datetime
-from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+
+SERVICES = {
+    "backend": {"host": "localhost", "port": 8080, "path": "/health", "timeout": 5},
     "market": {"host": "localhost", "port": 8081, "path": "/health", "timeout": 5},
     "frailbox": {"host": "localhost", "port": 8082, "path": "/health", "timeout": 10},
     "frontend": {"host": "localhost", "port": 3000, "path": "/", "timeout": 5},
@@ -69,17 +67,11 @@ DISK_THRESHOLD_CRITICAL = 90
 MEMORY_THRESHOLD_WARNING = 80
 MEMORY_THRESHOLD_CRITICAL = 90
 
-# ---------------------------------------------------------------------------
-# CHECK FUNCTIONS
-# ---------------------------------------------------------------------------
-MEMORY_THRESHOLD_WARNING = 80
-MEMORY_THRESHOLD_CRITICAL = 90
-
 
 # ---------------------------------------------------------------------------
 # CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
-        resp = conn.getresponse()
+
 def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
     import http.client
     try:
@@ -87,6 +79,12 @@ def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[s
         conn.request("GET", path)
         resp = conn.getresponse()
         status = resp.status
+        body = resp.read().decode("utf-8", errors="replace")[:200]
+        conn.close()
+
+        if status == 200:
+            result = "OK"
+            detail = f"HTTP {status}"
         elif status < 500:
             result = "WARNING"
             detail = f"HTTP {status}: {body[:100]}"
@@ -100,24 +98,27 @@ def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[s
 
 
 def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
-    except Exception as e:
-        return "CRITICAL", str(e), 0
-
-def check_tcp_port(host: str, port: int, timeout: int) -> Tuple[str, str, float]:
     try:
         start = time.time()
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.close()
+        latency = (time.time() - start) * 1000
+        return "OK", f"Connected ({latency:.1f}ms)", latency
+    except socket.timeout:
         return "CRITICAL", f"Connection timeout ({timeout}s)", 0
     except ConnectionRefusedError:
         return "CRITICAL", "Connection refused", 0
     except Exception as e:
-        return "CRITICAL", str(e), 0
-
-
-def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]:
     except Exception as e:
         return "CRITICAL", str(e), 0
 
+
 def check_certificate_expiry(host: str, 
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=10) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
                 if not cert:
                     return "WARNING", "No certificate found", 0
 
